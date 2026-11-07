@@ -1,0 +1,54 @@
+{
+  "executor": "mock",
+  "goal": "Create two dependent text artifacts and independently verify both",
+  "requirements": {
+    "R-A": "alpha\nbeta\n",
+    "R-B": "summary:\nalpha\nbeta\n"
+  },
+  "tasks": {
+    "A": {
+      "why": "Produce complete source text",
+      "requirements": [
+        "R-A"
+      ],
+      "depends_on": [],
+      "read_scope": [],
+      "write_scope": [
+        "a.txt"
+      ],
+      "checks": {
+        "R-A": "a.txt"
+      },
+      "max_attempts": 3,
+      "mock_outputs": {
+        "a.txt": "alpha\nbeta\n"
+      }
+    },
+    "B": {
+      "why": "Consume the accepted source text",
+      "requirements": [
+        "R-B"
+      ],
+      "depends_on": [
+        "A"
+      ],
+      "read_scope": [
+        "a.txt"
+      ],
+      "write_scope": [
+        "b.txt"
+      ],
+      "checks": {
+        "R-B": "b.txt"
+      },
+      "max_attempts": 3,
+      "mock_outputs": {
+        "b.txt": "summary:\nalpha\nbeta\n"
+      }
+    }
+  },
+  "final_checks": {
+    "R-A": "a.txt",
+    "R-B": "b.txt"
+  }
+}
