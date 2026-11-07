@@ -26,7 +26,7 @@ class DistributionTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             launcher = home / '.local/bin/nori'
             archive.unlink()  # Installed program must not depend on download or checkout.
-            self.assertIn('Nori 1.0.2-preview', call(str(launcher), '--version').stdout)
+            self.assertIn('Nori 1.0.3-preview', call(str(launcher), '--version').stdout)
             self.assertEqual(call(str(launcher), '--help').returncode, 0)
             server = subprocess.Popen([str(launcher), 'web', '--port', '0', '--no-browser', '--data-dir', str(root/'web-data')], cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:

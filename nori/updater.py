@@ -180,6 +180,27 @@ def manifest():
     return item
 
 
+def release_number(version):
+    """Compare supported release cores; suffixes do not order reviewed rebuilds."""
+    if not isinstance(version, str) or len(version) > 64:
+        return None
+    match = re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:[-+][0-9A-Za-z][0-9A-Za-z.+-]*)?', version)
+    return tuple(map(int, match.groups())) if match else None
+
+
+def update_version_error(item, data):
+    offered = release_number(item['version'])
+    installed_versions = [__version__, data['current']['version']]
+    if data.get('pending'):
+        installed_versions.append(data['pending']['version'])
+    installed_numbers = [release_number(value) for value in installed_versions]
+    if offered is None or any(value is None for value in installed_numbers):
+        return '无法安全比较版本号，已保留当前安装。请使用受支持的主版本.次版本.修订版本格式；如需退回，请使用独立回滚。'
+    if offered < max(installed_numbers):
+        return '发布缓存仍是较早版本，已保留当前安装和待生效版本；如需退回，请使用独立回滚。'
+    return None
+
+
 def check():
     result = status()
     item = manifest()
@@ -187,7 +208,12 @@ def check():
     if result['installed']:
         with locked():
             data = state()
-        result['update_available'] = item['bundle_sha256'] != (data.get('pending') or data['current'])['sha256']
+        reason = update_version_error(item, data)
+        result['update_available'] = not reason and item['bundle_sha256'] != (data.get('pending') or data['current'])['sha256']
+        if reason:
+            result['message'] = reason
+        elif not result['update_available']:
+            result['message'] = '发布版本已安装或已暂存，保留当前安装，无需重复更新。'
     return result
 
 
@@ -198,10 +224,14 @@ def stage_update(expected_commit=None, expected_manifest=None):
     if not status()['installed']:
         raise RuntimeError('Install the Nori zipapp first.')
     with locked():
-        initial_state_token = state_token(state())
+        initial_state = state()
+        initial_state_token = state_token(initial_state)
     item = manifest()
     if item['commit'] != expected_commit or item['manifest_token'] != expected_manifest:
         raise RuntimeError('The offered release changed. Check again before updating.')
+    reason = update_version_error(item, initial_state)
+    if reason:
+        raise RuntimeError(reason)
     encoded = fetch(f"https://raw.githubusercontent.com/{REPOSITORY}/{item['commit']}/distribution/nori.pyz.b64", (MAX_BUNDLE * 4 // 3) + 4096)
     try:
         payload = base64.b64decode(encoded.strip(), validate=True)
