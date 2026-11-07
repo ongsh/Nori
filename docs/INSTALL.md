@@ -35,7 +35,7 @@ This creates only synthetic tasks in a fresh temporary directory. For persistent
 
 ## Updates and removal
 
-For installations with managed updates, use the Web “版本与更新” panel: explicitly check, confirm the shown version, download and verify, then stop the old server and rerun `~/.local/bin/nori`. No long installation command is needed for subsequent updates. Activation is deferred until a safe next launch. See [update lifecycle and trust limits](UPDATES.md). The first upgrade from an older unmanaged installer still requires the supplied fixed-commit installation command. The launcher uses the Python interpreter that performed installation; retain that interpreter.
+For installations with the managed Web supervisor, the update panel can explicitly check, download, verify, safely switch and restart on the same local port. Active or unknown tasks and other running Nori processes block switching; they are not killed. The browser reconnects and verifies the new version, archive hash and process identity. Loading the new page is a separate button to avoid silently discarding unsaved edits. See [update lifecycle and trust limits](UPDATES.md). Upgrading from the 1.0.6-or-earlier exec-only launcher requires one final ordinary stop/start after staging this version; the new entry upgrades the recognized launcher automatically. Thereafter no terminal operation is needed for supported Web updates. The launcher uses the Python interpreter that performed installation; retain that interpreter.
 
 ```sh
 ~/.local/bin/nori --uninstall

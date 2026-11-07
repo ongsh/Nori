@@ -31,22 +31,43 @@ class WebApp:
         self.jobs = {}
         self.lock = threading.RLock()
         self.closing = threading.Event()
+        self.operation_lock = threading.RLock()
+        self.maintenance = False
+        self.instance_id = uuid.uuid4().hex
+        self.restart_client = None
         self.prototypes = PrototypeStore(self.root)
         if updater is None:
             from . import updater
         self.updater = updater
+        from .restart import attach
+        attach(self)
+
+    def update_status(self):
+        from .restart import status
+        return dict(self.updater.status(), **status(self))
 
     def update_action(self, body):
         action = body.get('action')
         if action == 'check':
-            return self.updater.check()
-        if action not in ('stage', 'rollback'):
+            from .restart import status
+            return dict(self.updater.check(), **status(self))
+        if action not in ('stage', 'rollback', 'restart'):
             raise NoriError('未知更新操作')
         if body.get('confirmed') is not True:
             raise NoriError('需要明确确认更新或回退')
+        if action == 'restart':
+            if not self.restart_client:
+                raise NoriError(self.update_status()['restart_block_reason'])
+            with self.lock:
+                if any(job.get('running') for job in self.jobs.values()):
+                    raise NoriError('仍有任务运行中，不能重启；请等待任务退出并确认执行状态。')
+            return self.restart_client.request(body.get('restart_token'))
         if action == 'stage':
-            return self.updater.stage_update(expected_commit=body.get('commit'), expected_manifest=body.get('manifest_digest'))
-        return self.updater.stage_rollback(expected_state=body.get('rollback_token'))
+            result = self.updater.stage_update(expected_commit=body.get('commit'), expected_manifest=body.get('manifest_digest'))
+        else:
+            result = self.updater.stage_rollback(expected_state=body.get('rollback_token'))
+        from .restart import status
+        return dict(result, **status(self))
 
     def map_action(self, body):
         action = body.get('action')
@@ -285,7 +306,11 @@ def create_server(data_dir, port=0, *, updater=None):
             try:
                 if self.path == '/': self.send(200, HTML.replace('__NONCE__', app.nonce), html=True)
                 elif self.path == '/api/requirements/template': self.send(200, {'prompt': ROLE_PROMPT, 'template': STANDARD_TEMPLATE})
-                elif self.path == '/api/update': self.send(200, app.updater.status())
+                elif self.path == '/api/update': self.send(200, app.update_status())
+                elif self.path == '/api/health':
+                    from . import __version__
+                    self.send(200, {'instance_id': app.instance_id, 'version': __version__,
+                                    'sha256': app.restart_client.identity['sha256'] if app.restart_client else None})
                 elif self.path == '/api/projects':
                     names = [p.name for p in sorted(app.root.iterdir()) if p.is_dir() and not p.is_symlink() and (p / 'control' / 'state.json').is_file()]
                     self.send(200, {'projects': names})
@@ -301,6 +326,12 @@ def create_server(data_dir, port=0, *, updater=None):
 
         def do_POST(self):
             if not self.allowed(mutate=True): return
+            with app.operation_lock:
+                if app.maintenance:
+                    self.send(409, {'error': 'Nori 正在安全重启，暂时不能修改数据或开始任务。'}); return
+                self.post_body()
+
+        def post_body(self):
             try:
                 if self.headers.get('Content-Type') != 'application/json': raise NoriError('JSON required')
                 size = int(self.headers.get('Content-Length', '0'))
@@ -314,7 +345,13 @@ def create_server(data_dir, port=0, *, updater=None):
                         result = app.prototypes.import_intake(body.get('raw_text'), confirmed=body.get('confirmed'), digest=body.get('digest'), command_id=body.get('command_id'))
                     self.send(200, result); return
                 if self.path == '/api/update':
-                    self.send(200, app.update_action(body)); return
+                    result = app.update_action(body)
+                    try:
+                        self.send(200, result)
+                    finally:
+                        if result.get('restarting') and app.restart_client:
+                            app.restart_client.write({'event': 'response_sent'})
+                    return
                 if self.path == '/api/map':
                     self.send(200, app.map_action(body)); return
                 if self.path == '/api/draft':
@@ -329,6 +366,8 @@ def create_server(data_dir, port=0, *, updater=None):
 
 def serve(data_dir, port=8765, open_browser=True):
     server = create_server(data_dir, port)
+    if server.app.restart_client:
+        server.app.restart_client.start(server)
     url = f'http://127.0.0.1:{server.server_port}/#token={server.app.token}'
     print(f'Nori 网页工作台：{url}', flush=True)
     if open_browser: webbrowser.open(url)
@@ -381,15 +420,16 @@ HTML = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta n
 <p>当前版本：<strong id="updateCurrent">读取中</strong><br>目标版本：<strong id="updateTarget">尚未检查</strong></p>
 <p id="updateCommit" class="muted" style="overflow-wrap:anywhere"></p><p id="rollbackTarget" class="muted"></p>
 <p class="muted">仅从固定官方仓库检查版本，下载经固定提交和摘要核验的版本。校验不等于独立安全审计，仍需信任仓库维护者。不会静默更新，不会申请管理员权限。</p>
-<p class="muted">更新只暂存下一次启动使用的程序，不替换正在运行的版本，也不自动重启。准备好后，请先停止旧 Nori，再重新运行启动器以激活。失败保留当前版本；项目数据不随程序回退。</p>
+<p class="muted">受支持的启动器会在明确确认后下载、校验、安全切换并自动重启。执行中或退出状态不明的任务会阻止重启；不会为了更新强行停止任务。只有重新连接并核实目标版本后才会显示完成。</p>
+<p id="updateBlock" role="status" style="color:#98651c"></p>
 <p id="updateStatus" role="status" aria-live="polite"></p>
 <p id="updateError" role="alert" style="color:#a64332"></p>
-<div class="toolbar"><button id="checkUpdate">检查新版本</button><button id="stageUpdate" class="primary" disabled>确认下载更新</button><button id="rollbackUpdate" disabled>回退上一版本</button><button id="backUpdate">返回工作台</button></div>
-<p class="muted">关闭面板不会丢失当前工作，也不会取消已开始的下载。</p>
+<div class="toolbar"><button id="checkUpdate">检查新版本</button><button id="refreshUpdate">刷新本机状态</button><button id="stageUpdate" class="primary" disabled>更新并自动重启</button><button id="restartUpdate" class="primary" hidden disabled>立即切换并重启</button><button id="rollbackUpdate" disabled>回退并自动重启</button><button id="retryReconnect" hidden>重新连接并核对</button><button id="reloadUpdate" class="primary" hidden>加载新版工作台</button><button id="backUpdate">返回工作台</button></div>
+<p id="updateDismissHint" class="muted">关闭面板不会启动或取消更新。</p>
 </dialog><script nonce="__NONCE__">
-const TOKEN=new URLSearchParams(location.hash.slice(1)).get('token')||'';let current='',snapshot=null,draft=null,binding=null,busy=false,mapProject=null,selectedMapNode=null;
+const TOKEN=new URLSearchParams(location.hash.slice(1)).get('token')||'';let current='',snapshot=null,draft=null,binding=null,busy=false,updateMutationLocked=false,mapProject=null,selectedMapNode=null;
 const $=id=>document.getElementById(id),pretty=x=>JSON.stringify(x,null,2),labels={AWAITING_APPROVAL:'等待批准计划',ACTIVE:'已批准',PAUSED:'已暂停',COMPLETED:'全部验收通过',AWAITING_DECISION:'需要你决定下一步',CANCELLED:'已取消',CLOSED_PARTIAL:'已部分结束',PENDING:'等待执行',REWORK:'验收失败，待返工',DONE:'验收通过',IN_PROGRESS:'执行中',IMPLEMENTED:'待验收',BLOCKED:'暂时阻塞',READY:'准备就绪',PASS:'通过',FAIL:'失败',INCONCLUSIVE:'尚不能确定'};const label=x=>labels[x]||x;
-async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:{'X-Nori-Token':TOKEN,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});const x=await r.json();if(!r.ok)throw Error(x.error);return x}
+async function api(path,body){if(body&&updateMutationLocked)throw Error('正在切换版本，暂不能修改项目，请等待版本核对完成。');const r=await fetch(path,{method:body?'POST':'GET',headers:{'X-Nori-Token':TOKEN,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});const x=await r.json();if(!r.ok)throw Error(x.error);return x}
 function note(e){$('notice').textContent=e?String(e):'';$('notice').className=e?'error':''}
 async function guard(f){if(busy)return;busy=true;note('');try{await f()}catch(e){note(e.message)}finally{busy=false}}
 function textNode(tag,text,cls){let el=document.createElement(tag);el.textContent=text;if(cls)el.className=cls;return el}
@@ -450,14 +490,131 @@ $('repairExample').onclick=()=>guard(()=>cmd('repair-example'));$('propose').onc
 function fields(){return {task:$('task').value,requirement:$('requirement').value,reason:$('reason').value}}
 $('binding').onclick=()=>guard(async()=>{let x=await cmd('manual-binding',fields());binding=x.result.binding;$('bindingView').textContent=pretty(x.result)});$('manual').onclick=()=>guard(()=>cmd('manual',{...fields(),binding,verdict:$('verdict').value}));$('rework').onclick=()=>guard(()=>cmd('rework',fields()));$('retry').onclick=()=>guard(()=>cmd('retry-verification',fields()));
 
-let updateState=null,updateBusy=false;
-function renderUpdate(){const u=updateState||{};$('updateCurrent').textContent=u.current_version||'未知';$('updateCommit').textContent=u.commit?'发布提交：'+u.commit:'';$('updateTarget').textContent=u.latest_version||u.next_version||'尚未检查';$('updateStatus').textContent=u.message||(u.installed===false?'源码运行不支持自更新，请使用独立启动器安装。':u.pending?'已暂存。请停止旧 Nori，再重新运行启动器激活。':u.latest_version?(u.update_available?'发现新版本；请确认后下载。':'检查完成，当前无需更新。'):'点击检查新版本后，再决定是否下载。');$('checkUpdate').disabled=updateBusy||u.installed===false;$('stageUpdate').disabled=updateBusy||u.installed===false||!u.update_available||u.pending;$('rollbackUpdate').disabled=updateBusy||u.installed===false||!(u.pending||u.rollback_available);$('rollbackUpdate').textContent=u.pending?'取消待生效更新':'回退到上一版';$('rollbackTarget').textContent=u.rollback_target_version?(u.pending?'取消后继续使用：':'回退目标：')+u.rollback_target_version:'';}
-async function updateRequest(action){if(updateBusy)return;updateBusy=true;$('updateError').textContent='';renderUpdate();$('updateStatus').textContent=action==='check'?'正在检查版本…':action==='stage'?'正在下载并校验，当前版本继续运行…':action==='rollback'?'正在准备回退…':'正在读取版本…';try{updateState=await api('/api/update',action?{action,...(action==='stage'?{commit:updateState.commit,manifest_digest:updateState.manifest_digest}:{}),...(action==='rollback'?{rollback_token:updateState.rollback_token}:{}),...(action==='stage'||action==='rollback'?{confirmed:true}:{})}:undefined)}catch(e){$('updateError').textContent='操作失败，当前版本保留：'+e.message}finally{updateBusy=false;renderUpdate()}}
-$('openUpdate').onclick=()=>{$('updateDialog').showModal();if(!updateBusy)updateRequest()};
-$('closeUpdate').onclick=$('backUpdate').onclick=()=>$('updateDialog').close();
+// Update requests are isolated from project mutations. A lost restart response is
+// uncertain, never a reason to resend the mutation or announce success.
+let updateState=null,updateBusy=false,restartAttempt=null,updateMessage='',updateError='',updateNeedsStatus=false;
+const UPDATE_RECONNECT_MS=90000,UPDATE_POLL_MS=800,UPDATE_SESSION_KEY='nori-restart-attempt';
+function rememberRestart(attempt){try{if(attempt)sessionStorage.setItem(UPDATE_SESSION_KEY,JSON.stringify(attempt));else sessionStorage.removeItem(UPDATE_SESSION_KEY)}catch(e){/* A blocked browser store must not prevent reconnecting in this page. */}}
+function renderUpdate(){
+  const u=updateState||{},uncertain=!!restartAttempt||['restarting','uncertain'].includes(u.restart_state),blocked=!!u.restart_block_reason;
+  $('updateCurrent').textContent=u.current_version||'未知';
+  $('updateCommit').textContent=u.commit?'发布提交：'+u.commit:'';
+  $('updateTarget').textContent=restartAttempt?.version||u.pending_version||u.latest_version||u.next_version||'尚未检查';
+  $('updateBlock').textContent=u.restart_block_reason||'';
+  $('updateStatus').textContent=updateMessage||u.message||(u.installed===false?'源码运行不支持自更新，请使用独立启动器安装。':u.pending?'已下载并校验，尚未切换运行版本。':u.latest_version?(u.update_available?'发现新版本，请确认版本后更新。':'检查完成，当前无需更新。'):'仅在点击检查新版本后访问更新源。');
+  $('updateError').textContent=updateError;
+  $('checkUpdate').disabled=updateBusy||uncertain||u.installed===false;
+  $('refreshUpdate').disabled=updateBusy||!!restartAttempt;
+  $('stageUpdate').disabled=updateBusy||uncertain||updateNeedsStatus||u.installed===false||!u.update_available||u.pending;
+  $('stageUpdate').textContent=u.restart_supported&&!blocked?'更新并自动重启':'下载并暂存';
+  $('restartUpdate').hidden=!u.pending;
+  $('restartUpdate').disabled=updateBusy||uncertain||updateNeedsStatus||!u.restart_supported||blocked;
+  $('rollbackUpdate').disabled=updateBusy||uncertain||updateNeedsStatus||u.installed===false||!(u.pending||u.rollback_available);
+  $('rollbackUpdate').textContent=u.pending?'取消待生效更新':u.restart_supported&&!blocked?'回退并自动重启':'暂存上一版本';
+  $('rollbackTarget').textContent=u.rollback_target_version?(u.pending?'取消后继续使用：':'回退目标：')+u.rollback_target_version:'';
+  $('retryReconnect').hidden=!restartAttempt||updateBusy;
+  $('reloadUpdate').hidden=!(u.restart_state==='completed'&&!uncertain&&updateMessage.startsWith('已验证'));
+  $('closeUpdate').disabled=$('backUpdate').disabled=updateBusy&&updateMutationLocked;
+  $('updateDismissHint').textContent=updateMutationLocked?'正在处理更新，请保持此页面。不会停止正在执行或状态不明的任务。':'关闭面板不会启动或取消更新。项目数据不随程序版本回退。';
+}
+async function updateApi(body,timeout=70000){
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeout);
+  try{
+    const r=await fetch('/api/update',{method:body?'POST':'GET',cache:'no-store',signal:controller.signal,headers:{'X-Nori-Token':TOKEN,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
+    const x=await r.json();
+    if(!r.ok){const e=Error(x.error||'更新请求失败');e.rejected=true;throw e}
+    return x;
+  }catch(e){if(e.name==='AbortError')throw Error('请求超时，尚不能确认操作结果');throw e}finally{clearTimeout(timer)}
+}
+function verifiedRestart(u,a){return u.restart_state==='completed'&&u.current_version===a.version&&u.running_sha256===a.sha256&&!!u.instance_id&&u.instance_id!==a.instance;}
+async function reconnectUpdate(){
+  if(!restartAttempt)return;
+  updateBusy=true;updateMutationLocked=true;updateError='';
+  updateMessage='正在等待服务重启并核对新版身份，短暂断开是正常现象…';renderUpdate();
+  const attempt=restartAttempt,deadline=Date.now()+UPDATE_RECONNECT_MS;
+  try{
+    while(Date.now()<deadline){
+      try{
+        const u=await updateApi(undefined,Math.min(5000,Math.max(1,deadline-Date.now())));
+        updateState=u;
+        if(verifiedRestart(u,attempt)){
+          restartAttempt=null;rememberRestart(null);updateMutationLocked=false;
+          updateMessage='已验证目标版本 '+u.current_version+' 正在运行，服务更新和重启已完成，无需终端操作。点击“加载新版工作台”更新本页界面，未提交的输入会丢失。';
+          return;
+        }
+        if(u.restart_state==='rolled_back'||u.restart_state==='blocked'){
+          restartAttempt=null;rememberRestart(null);updateMutationLocked=false;
+          updateMessage=u.restart_state==='rolled_back'?'新版未能正常启动，服务已回退。请检查下方原因后再决定是否重试。':'重启被阻止，待生效版本未获确认。';
+          updateError=u.restart_error||u.restart_block_reason||'请刷新本机状态并检查任务，再重试。';
+          return;
+        }
+        updateMessage=u.restart_state==='completed'?'服务已连接，但运行版本、文件摘要或进程身份尚未匹配目标。继续核对…':'正在等待服务重启并核对新版身份…';
+        renderUpdate();
+      }catch(e){updateMessage='服务暂时不可连接，正在重连并核对版本…';renderUpdate()}
+      await new Promise(resolve=>setTimeout(resolve,UPDATE_POLL_MS));
+    }
+    updateMessage='尚未确认更新完成，已停止自动等待。不会重复发送重启请求。';
+    updateError='90 秒内未核实目标版本。请点击“重新连接并核对”；若仍无法连接，重新打开 Nori 启动器以恢复服务。不要重复安装或删除项目数据。';
+  }finally{updateBusy=false;renderUpdate()}
+}
+async function restartStagedUpdate(){
+  const u=updateState;
+  if(!u?.pending||!u.restart_supported||u.restart_block_reason)return;
+  if(!u.pending_version||!u.pending_sha256||!u.instance_id||!u.restart_token)throw Error('缺少待更新版本的身份信息。请刷新本机状态后再试，未发送重启请求。');
+  restartAttempt={version:u.pending_version,sha256:u.pending_sha256,instance:u.instance_id};rememberRestart(restartAttempt);
+  updateMessage='已校验下载，正在请求安全切换并重启…';renderUpdate();
+  try{await updateApi({action:'restart',confirmed:true,restart_token:u.restart_token},10000)}catch(e){
+    if(e.rejected){
+      // A supervisor admission timeout may be returned as an HTTP error. Only
+      // an authoritative idle/blocked response can release the mutation lock.
+      let observed=null;try{observed=await updateApi(undefined,5000);updateState=observed}catch(statusError){}
+      if(observed&&['idle','blocked','rolled_back'].includes(observed.restart_state)&&!observed.restart_uncertain){restartAttempt=null;rememberRestart(null);throw e}
+    }
+    // The response may be lost precisely because the server is restarting.
+  }
+  await reconnectUpdate();
+}
+async function updateRequest(action){
+  if(updateBusy||restartAttempt||(updateNeedsStatus&&action&&action!=='check'))return;
+  updateBusy=true;updateMutationLocked=!!action&&action!=='check';updateError='';
+  updateMessage=action==='check'?'正在检查版本…':action==='stage'?'正在下载并校验，当前版本继续运行…':action==='rollback'?'正在准备版本操作…':action==='restart'?'正在核对待生效版本…':'正在读取本机状态…';renderUpdate();
+  const before=updateState||{},cancelling=action==='rollback'&&before.pending,autoRestartApproved=before.restart_supported&&!before.restart_block_reason;
+  try{
+    if(action==='restart')await restartStagedUpdate();
+    else{
+      updateState=await updateApi(action?{action,...(action==='stage'?{commit:before.commit,manifest_digest:before.manifest_digest}:{}),...(action==='rollback'?{rollback_token:before.rollback_token}:{}),...(action==='stage'||action==='rollback'?{confirmed:true}:{})}:undefined);
+      updateMessage='';updateNeedsStatus=false;
+      if(['restarting','uncertain'].includes(updateState.restart_state)){
+        const u=updateState;
+        if(u.pending_version&&u.pending_sha256&&u.instance_id){restartAttempt={version:u.pending_version,sha256:u.pending_sha256,instance:u.instance_id};rememberRestart(restartAttempt);await reconnectUpdate()}
+        else{updateMutationLocked=true;updateMessage='服务正在切换版本或重启结果尚不确定。请稍后刷新本机状态，暂不能修改项目。'}
+      }else if((action==='stage'||action==='rollback')&&!cancelling&&updateState.pending){
+        if(autoRestartApproved&&updateState.restart_supported&&!updateState.restart_block_reason)await restartStagedUpdate();
+        else updateMessage='已下载并校验，仍在运行 '+(updateState.current_version||'原版本')+'。'+(updateState.restart_supported?(updateState.restart_block_reason?'请处理重启阻塞后刷新本机状态，再点击“立即切换并重启”。':'本次只获准下载，请点击“立即切换并重启”确认生效。'):'旧启动器仅需最后一次停止并启动 Nori 完成迁移，无需重新安装；之后可自动重启。');
+      }else if(cancelling)updateMessage='已取消待生效更新，继续运行 '+(updateState.current_version||'当前版本')+'。';
+    }
+  }catch(e){
+    updateError=e.message;
+    updateMessage=action&&action!=='check'?'操作尚未完成，请先核对本机状态。':'本次检查未完成，可重试。';
+    try{updateState=await updateApi(undefined,5000);updateNeedsStatus=false}catch(statusError){if(action&&action!=='check')updateNeedsStatus=true;updateError+='；本机状态暂时无法读取，请先刷新本机状态，暂不能重复操作。'}
+  }finally{updateBusy=false;if(!restartAttempt&&!['restarting','uncertain'].includes(updateState?.restart_state))updateMutationLocked=false;renderUpdate()}
+}
+function updateConfirmation(u,target,verb){
+  const follow=u.restart_supported&&!u.restart_block_reason?'下载校验后将自动安全切换并重启，页面会短暂断开。':'本次只下载并暂存，不自动停止任务。'+(u.restart_block_reason||'旧启动器需完成一次迁移后才能自动重启。');
+  return '确认'+verb+'到 '+target+'？当前运行 '+u.current_version+'。\n'+follow+'\n项目数据保留，且不随程序回退。请先保存尚未提交的编辑。';
+}
+$('openUpdate').onclick=()=>{if(!$('updateDialog').open)$('updateDialog').showModal();if(!updateBusy&&!restartAttempt)updateRequest();else renderUpdate()};
+$('closeUpdate').onclick=$('backUpdate').onclick=()=>{if(!(updateBusy&&updateMutationLocked))$('updateDialog').close()};
+$('updateDialog').addEventListener('cancel',event=>{if(updateBusy&&updateMutationLocked)event.preventDefault()});
 $('checkUpdate').onclick=()=>updateRequest('check');
-$('stageUpdate').onclick=()=>{if(!updateBusy&&updateState?.update_available&&confirm('确认下载 '+updateState.latest_version+'？仅暂存下次启动版本。请先停止旧 Nori，再重新运行启动器。'))updateRequest('stage')};
-$('rollbackUpdate').onclick=()=>{const u=updateState;if(!updateBusy&&u&&(u.pending||u.rollback_available)&&confirm(u.pending?'确认取消待生效更新？继续使用 '+u.rollback_target_version+'。':'确认回退到 '+u.rollback_target_version+'？停止旧 Nori 后重新运行启动器生效，项目数据不会回退。'))updateRequest('rollback')};
+$('refreshUpdate').onclick=()=>updateRequest();
+$('stageUpdate').onclick=()=>{const u=updateState;if(!updateBusy&&!restartAttempt&&u?.update_available&&!u.pending&&confirm(updateConfirmation(u,u.latest_version,'更新')))updateRequest('stage')};
+$('restartUpdate').onclick=()=>{const u=updateState;if(!updateBusy&&!restartAttempt&&u?.pending&&u.restart_supported&&!u.restart_block_reason&&confirm('确认立即切换到 '+u.pending_version+' 并重启？当前运行 '+u.current_version+'。页面会短暂断开，项目数据保留。请先保存未提交的编辑。'))updateRequest('restart')};
+$('rollbackUpdate').onclick=()=>{const u=updateState;if(!updateBusy&&!restartAttempt&&u&&(u.pending||u.rollback_available)&&confirm(u.pending?'确认取消待生效更新？继续使用 '+u.rollback_target_version+'。':updateConfirmation(u,u.rollback_target_version,'回退')))updateRequest('rollback')};
+$('retryReconnect').onclick=()=>{if(!updateBusy&&restartAttempt)reconnectUpdate()};
+$('reloadUpdate').onclick=()=>{if(!restartAttempt&&!updateMutationLocked)location.reload()};
+// Reloading or navigating Back during a handoff only resumes read-only checks.
+try{const saved=JSON.parse(sessionStorage.getItem(UPDATE_SESSION_KEY)||'null');if(saved&&typeof saved.version==='string'&&/^[0-9a-f]{64}$/.test(saved.sha256)&&typeof saved.instance==='string'){restartAttempt=saved;$('updateDialog').showModal();reconnectUpdate()}}catch(e){rememberRestart(null)}
 
-guard(async()=>{const info=await api('/api/info');$('dataLocation').textContent=info.data_dir;await list();await showMaps()});setInterval(async()=>{if(current&&!busy){try{await refresh()}catch(e){note(e.message)}}},1500);
+guard(async()=>{const info=await api('/api/info');$('dataLocation').textContent=info.data_dir;await list();await showMaps()});setInterval(async()=>{if(current&&!busy&&!updateMutationLocked){try{await refresh()}catch(e){note(e.message)}}},1500);
 </script></body></html>'''

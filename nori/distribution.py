@@ -9,6 +9,7 @@ import tempfile
 import zipfile
 
 MARKER = '# Nori managed launcher v1'
+GENERATION = '# Nori managed web supervisor v2'
 
 
 # A standalone launcher avoids importing a zipapp before deciding which immutable
@@ -30,6 +31,8 @@ def validate(entry):
     return path
 try:
     safe(root)
+    gate = lock('launch.lock')
+    fcntl.flock(gate, fcntl.LOCK_EX)
     run = lock('run.lock')
     exclusive = True
     try: fcntl.flock(run, fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -77,6 +80,7 @@ try:
     path = validate(state['current'])
     os.close(update)
     fcntl.flock(run, fcntl.LOCK_SH)
+    os.close(gate)
     os.set_inheritable(run, True)
     os.environ['NORI_RUN_LOCK_FD'] = str(run)
     os.execv(sys.executable, [sys.executable, str(path), *sys.argv[1:]])
@@ -154,7 +158,7 @@ def install(source):
                         atomic(legacy_path, legacy)
                     previous = {'sha256': legacy_hash, 'version': 'legacy'}
             save({'current': {'sha256': digest, 'version': __version__}, 'pending': None, 'previous': previous})
-        text = '#!' + sys.executable + '\n' + MARKER + '\n' + LAUNCHER
+        text = '#!' + sys.executable + '\n' + MARKER + '\n' + GENERATION + '\n' + LAUNCHER
         # Same-filesystem replacement prevents partially written executable files.
         destinations = [(launcher, text.encode(), 0o700)]
         if not target.exists():
@@ -198,6 +202,29 @@ def uninstall():
     print('Removed Nori program and launcher. All project/control data retained.')
 
 
+def upgrade_launcher():
+    """One ordinary v1 restart loads this release and enables subsequent web restarts."""
+    from .updater import locked
+    _, launcher = paths()
+    with locked():
+        if not launcher.is_file() or MARKER not in launcher.read_text().splitlines():
+            raise RuntimeError('Launcher ownership check failed; reinstall the Nori distribution.')
+        if GENERATION not in launcher.read_text().splitlines():
+            content = '#!' + sys.executable + '\n' + MARKER + '\n' + GENERATION + '\n' + LAUNCHER
+            # atomic() is mode 600; prepare executable mode before replacement.
+            fd, temporary = tempfile.mkstemp(dir=launcher.parent)
+            try:
+                with os.fdopen(fd, 'wb') as handle:
+                    handle.write(content.encode()); handle.flush(); os.fsync(handle.fileno())
+                os.chmod(temporary, 0o700)
+                os.replace(temporary, launcher)
+                directory = os.open(launcher.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try: os.fsync(directory)
+                finally: os.close(directory)
+            finally:
+                if os.path.exists(temporary): os.unlink(temporary)
+
+
 def entry():
     try:
         if sys.argv[1:] == ['--install']:
@@ -205,6 +232,11 @@ def entry():
         if sys.argv[1:] == ['--uninstall']:
             uninstall(); return 0
         supported()
+        from .updater import running_managed
+        if not os.environ.get('NORI_WEB_CONTROL_FD') and running_managed() and (not sys.argv[1:] or sys.argv[1] == 'web'):
+            upgrade_launcher()
+            from .restart import supervise
+            return supervise(sys.argv[1:])
         from .__main__ import main
         return main()
     except (OSError, RuntimeError, UnicodeError) as exc:

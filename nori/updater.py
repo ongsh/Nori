@@ -141,6 +141,8 @@ def status():
     result.update(installed=True, pending=bool(data.get('pending')),
                   rollback_available=bool(data.get('previous') or data.get('pending')),
                   rollback_token=state_token(data),
+                  restart_token=state_token(data),
+                  pending_sha256=(data.get('pending') or {}).get('sha256'),
                   previous_version=(data.get('previous') or {}).get('version'),
                   pending_version=(data.get('pending') or {}).get('version'),
                   rollback_action='cancel_pending' if data.get('pending') else 'rollback',

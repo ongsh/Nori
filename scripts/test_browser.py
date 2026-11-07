@@ -14,47 +14,214 @@ from playwright.sync_api import sync_playwright, expect
 
 
 class FixtureUpdater:
-    """Synthetic updater: never connects to a network or replaces executable files."""
+    """Synthetic HTTP update/restart contract, never a real process or download.
+
+    Real supervisor lifecycle and task-admission tests live in the Python suite.
+    This fixture deliberately separates announced completion from process identity
+    so the browser must independently verify all fields before claiming success.
+    """
     def __init__(self):
-        self.pending = False
+        self.pending = None
+        self.current = 'fixture-1'
+        self.previous = 'fixture-0'
         self.installed = True
+        self.supported = True
+        self.block_reason = ''
         self.fail = False
         self.calls = []
+        self.instance = 1
+        self.restart_state = 'idle'
+        self.restart_error = ''
+        self.outcome = 'success'
+        self.restart_started = None
+        self.reject_restart = False
+        self.clear_block_during_stage = False
+
+    @staticmethod
+    def sha(version):
+        import hashlib
+        return hashlib.sha256(version.encode()).hexdigest()
 
     def status(self):
-        return dict(installed=self.installed, current_version='fixture-1', pending=self.pending,
-                    rollback_available=True, next_version='fixture-2' if self.pending else None,
-                    previous_version='fixture-0', pending_version='fixture-2' if self.pending else None,
+        if self.restart_started and time.monotonic() - self.restart_started > 1:
+            if self.outcome == 'success':
+                self.previous, self.current = self.current, self.pending
+                self.pending = None
+                self.instance += 1
+                self.restart_state = 'completed'
+                self.restart_started = None
+            elif self.outcome == 'rolled_back':
+                self.pending = None
+                self.instance += 1
+                self.restart_state = 'rolled_back'
+                self.restart_error = '模拟新版健康检查失败，已恢复原版本'
+                self.restart_started = None
+        result = dict(installed=self.installed, current_version=self.current,
+                    active_version=self.current, pending=bool(self.pending),
+                    rollback_available=True, next_version=self.pending or self.current,
+                    previous_version=self.previous, pending_version=self.pending,
+                    running_sha256=self.sha(self.current),
+                    pending_sha256=self.sha(self.pending) if self.pending else None,
+                    instance_id='fixture-process-'+str(self.instance),
+                    restart_supported=self.supported,
+                    restart_block_reason=self.block_reason,
+                    restart_token='restart-'+str(self.instance)+'-'+str(self.pending),
+                    restart_state=self.restart_state, restart_error=self.restart_error,
                     rollback_action='cancel_pending' if self.pending else 'rollback',
-                    rollback_target_version='fixture-1' if self.pending else 'fixture-0',
+                    rollback_target_version=self.current if self.pending else self.previous,
                     rollback_token='pending-token' if self.pending else 'current-token')
+        if self.restart_started and self.outcome in ('wrong_instance', 'wrong_digest'):
+            result.update(restart_state='completed', current_version=self.pending,
+                          running_sha256=self.sha(self.pending),
+                          instance_id='fixture-process-'+str(self.instance + 1))
+            if self.outcome == 'wrong_instance':
+                result['instance_id'] = 'fixture-process-'+str(self.instance)
+            else:
+                result['running_sha256'] = self.sha(self.current)
+        return result
 
-    def check(self):
-        self.calls.append('check')
-        time.sleep(.4)
-        if self.fail:
-            raise RuntimeError('模拟下载源不可用')
-        return dict(self.status(), latest_version='fixture-2', commit='a'*40,
-                    manifest_digest='b'*64, update_available=True)
+    def action(self, body):
+        action = body.get('action')
+        if action == 'check':
+            self.calls.append('check')
+            time.sleep(.4)
+            if self.fail:
+                raise RuntimeError('模拟下载源不可用')
+            return dict(self.status(), latest_version='fixture-2', commit='a'*40,
+                        manifest_digest='b'*64, update_available=self.current != 'fixture-2')
+        assert body.get('confirmed') is True
+        if action == 'stage':
+            assert body.get('commit') == 'a'*40 and body.get('manifest_digest') == 'b'*64
+            self.calls.append('stage')
+            time.sleep(.4)
+            self.pending = 'fixture-2'
+            if self.clear_block_during_stage:
+                self.block_reason = ''
+            self.restart_state = 'idle'
+            self.restart_error = ''
+            return self.status()
+        if action == 'rollback':
+            assert body.get('rollback_token') == self.status()['rollback_token']
+            self.calls.append('cancel_pending' if self.pending else 'rollback')
+            self.pending = None if self.pending else self.previous
+            self.restart_state = 'idle'
+            self.restart_error = ''
+            return self.status()
+        if action == 'restart':
+            assert body.get('restart_token') == self.status()['restart_token']
+            self.calls.append('restart')
+            if self.reject_restart or self.block_reason:
+                raise RuntimeError('模拟任务状态发生变化，重启被阻止')
+            assert self.supported and self.pending
+            self.restart_state = 'restarting'
+            self.restart_started = time.monotonic()
+            return dict(restarting=True, restart_state='restarting',
+                        target_version=self.pending, target_sha256=self.sha(self.pending))
+        raise RuntimeError('Unsupported synthetic update action')
 
-    def stage_update(self, expected_commit=None, expected_manifest=None):
-        assert expected_commit == 'a'*40 and expected_manifest == 'b'*64
-        self.calls.append('stage')
-        time.sleep(.4)
-        self.pending = True
-        return self.status()
 
-    def stage_rollback(self, expected_state=None):
-        assert expected_state == self.status()['rollback_token']
-        self.calls.append('cancel_pending' if self.pending else 'rollback')
-        self.pending = not self.pending
-        return self.status()
+def fixture_update_endpoint(server, updater):
+    """Replace only update HTTP behavior; all other app routes remain real."""
+    class FixtureHandler(server.RequestHandlerClass):
+        def do_GET(self):
+            if self.path != '/api/update':
+                return super().do_GET()
+            if self.allowed():
+                self.send(200, updater.status())
+
+        def do_POST(self):
+            if self.path != '/api/update':
+                return super().do_POST()
+            if not self.allowed(mutate=True):
+                return
+            try:
+                body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                self.send(200, updater.action(body))
+            except Exception as exc:
+                self.send(400, {'error': str(exc)})
+    server.RequestHandlerClass = FixtureHandler
+
+
+def verify_real_installed_restart(page, screenshot):
+    """Real installed supervisor and replacement process, synthetic local release.
+
+    Only the public manifest/download steps are replaced. Restart admission,
+    process teardown, candidate health, same-origin authentication, status polls,
+    browser verification and the new HTML all use the actual installed program.
+    """
+    from tests.test_restart import RestartTests
+    fixture = RestartTests('test_same_port_auth_identity_data_and_second_restart')
+    route_pattern = None
+    try:
+        fixture.setUp()
+        initial = fixture.request()[1]
+        code, created = fixture.request({'action': 'create', 'title': 'Browser real restart preservation'}, '/api/map')
+        assert code == 200, created
+        fixture.data.joinpath('browser-preserve.txt').write_text('synthetic immutable project bytes')
+        files = {str(path.relative_to(fixture.data)): path.read_bytes()
+                 for path in fixture.data.rglob('*') if path.is_file()}
+        actions = []
+        offered_commit, offered_manifest = 'e'*40, 'f'*64
+        route_pattern = fixture.origin + '/api/update'
+
+        def local_release(route):
+            if route.request.method != 'POST':
+                route.continue_()
+                return
+            body = route.request.post_data_json
+            actions.append(body['action'])
+            if body['action'] == 'check':
+                payload = dict(fixture.request()[1], latest_version='9.0.0-test',
+                    commit=offered_commit, manifest_digest=offered_manifest, update_available=True)
+                route.fulfill(status=200, content_type='application/json', body=json.dumps(payload))
+            elif body['action'] == 'stage':
+                assert body['confirmed'] is True
+                assert body['commit'] == offered_commit and body['manifest_digest'] == offered_manifest
+                payload = fixture.stage()
+                route.fulfill(status=200, content_type='application/json', body=json.dumps(payload))
+            else:
+                # The critical restart action must reach the real installed server.
+                route.continue_()
+
+        page.route(route_pattern, local_release)
+        page.goto(fixture.origin + '/#token=' + fixture.token)
+        expect(page.locator('#mapList [data-map-id]').first).to_be_visible()
+        page.locator('#openUpdate').click()
+        expect(page.locator('#updateCurrent')).to_have_text(initial['current_version'])
+        page.locator('#checkUpdate').click()
+        expect(page.locator('#updateTarget')).to_have_text('9.0.0-test')
+        page.locator('#stageUpdate').click()
+        expect(page.locator('#updateStatus')).to_contain_text('已验证目标版本 9.0.0-test', timeout=30000)
+        expect(page.locator('#updateCurrent')).to_have_text('9.0.0-test')
+        assert actions == ['check', 'stage', 'restart'], actions
+        after = fixture.request()[1]
+        assert after['restart_state'] == 'completed'
+        assert after['instance_id'] != initial['instance_id']
+        assert after['running_sha256'] != initial['running_sha256']
+        assert page.url == fixture.origin + '/#token=' + fixture.token
+        assert fixture.request(headers={'X-Nori-Token': 'wrong'})[0] == 403
+        for name, content in files.items():
+            assert (fixture.data / name).read_bytes() == content, name
+        screenshot('updates-real-restart')
+        page.locator('#reloadUpdate').click()
+        expect(page.locator('#mapList [data-map-id="'+created['id']+'"]').first).to_be_visible()
+        page.locator('#openUpdate').click()
+        expect(page.locator('#updateCurrent')).to_have_text('9.0.0-test')
+        assert not page.locator('#updateStatus').inner_text().startswith('已验证'), 'A fresh page must not invent a verification receipt'
+        screenshot('updates-real-new-page')
+        page.locator('#closeUpdate').click()
+        print('Real installed browser restart PASS: browser confirmation -> synthetic local staging -> real supervisor replacement -> same port/token -> verified new version/hash/instance -> refreshed HTML; project bytes retained. No network release download used.')
+    finally:
+        if route_pattern:
+            page.unroute(route_pattern)
+        assert fixture.doCleanups(), 'Installed browser fixture cleanup failed'
 
 
 def main():
     with tempfile.TemporaryDirectory(prefix='nori-browser-') as directory:
         updater = FixtureUpdater()
         server = create_server(Path(directory) / 'data', port=0, updater=updater)
+        fixture_update_endpoint(server, updater)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -65,7 +232,10 @@ def main():
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 prompt_answers = []
                 confirm_answers = []
+                confirm_messages = []
                 def handle_dialog(dialog):
+                    if dialog.type == 'confirm':
+                        confirm_messages.append(dialog.message)
                     if dialog.type == 'prompt':
                         dialog.accept(prompt_answers.pop(0) if prompt_answers else 'Synthetic repair')
                     elif confirm_answers and not confirm_answers.pop(0):
@@ -96,30 +266,165 @@ def main():
                 confirm_answers.append(False)
                 page.locator('#stageUpdate').click()
                 assert updater.calls == ['check'], 'Cancelled confirmation must not download'
+                assert 'fixture-2' in confirm_messages[-1] and '自动' in confirm_messages[-1]
                 page.locator('#stageUpdate').click()
                 expect(page.locator('#stageUpdate')).to_be_disabled()
-                expect(page.locator('#updateStatus')).to_contain_text('已暂存')
+                expect(page.locator('#closeUpdate')).to_be_disabled()
+                page.keyboard.press('Escape')
+                expect(page.locator('#updateDialog')).to_be_visible()
+                # Even direct repeated handler invocation cannot send a duplicate mutation.
+                page.evaluate("document.getElementById('stageUpdate').onclick()")
                 expect(page.locator('#updateCurrent')).to_have_text('fixture-1')
-                assert updater.calls == ['check', 'stage']
-                expect(page.locator('#rollbackUpdate')).to_have_text('取消待生效更新')
-                expect(page.locator('#rollbackTarget')).to_contain_text('fixture-1')
+                expect(page.locator('#updateStatus')).to_contain_text('已验证目标版本 fixture-2', timeout=10000)
+                expect(page.locator('#updateCurrent')).to_have_text('fixture-2')
+                expect(page.locator('#reloadUpdate')).to_be_visible()
+                assert updater.calls == ['check', 'stage', 'restart']
+                screenshot('updates-restarted')
+
+                # Rollback also applies automatically, only after target confirmation.
+                confirm_answers.append(False)
                 page.locator('#rollbackUpdate').click()
-                expect(page.locator('#rollbackUpdate')).to_have_text('回退到上一版')
+                assert updater.calls[-1] == 'restart'
+                page.locator('#rollbackUpdate').click()
+                expect(page.locator('#updateStatus')).to_contain_text('已验证目标版本 fixture-1', timeout=10000)
+                assert updater.calls[-2:] == ['rollback', 'restart']
+                expect(page.locator('#rollbackTarget')).to_contain_text('fixture-2')
+
+                # Active and unknown task states permit staging, never implicit task stop.
+                updater.block_reason = '活动任务尚在执行，请先暂停并确认退出。'
+                page.locator('#checkUpdate').click()
+                expect(page.locator('#stageUpdate')).to_be_enabled()
+                expect(page.locator('#updateBlock')).to_contain_text('活动任务')
+                page.locator('#stageUpdate').click()
+                expect(page.locator('#updateStatus')).to_contain_text('已下载并校验')
+                expect(page.locator('#restartUpdate')).to_be_disabled()
+                expect(page.locator('#updateCurrent')).to_have_text('fixture-1')
+                assert updater.calls[-1] == 'stage'
+                updater.block_reason = '任务退出状态不明，请先核对退出。'
+                page.locator('#refreshUpdate').click()
+                expect(page.locator('#updateBlock')).to_contain_text('状态不明')
+                expect(page.locator('#restartUpdate')).to_be_disabled()
+                screenshot('updates-blocked')
+                confirm_answers.append(False)
+                page.locator('#rollbackUpdate').click()
+                assert updater.calls[-1] == 'stage'
+                page.locator('#rollbackUpdate').click()
+                expect(page.locator('#updateStatus')).to_contain_text('已取消待生效更新')
                 assert updater.calls[-1] == 'cancel_pending'
-                page.locator('#backUpdate').click()
+                updater.block_reason = ''
+
+                # Permission to stage only does not become restart permission merely
+                # because a blocker disappears while the download is in progress.
+                updater.block_reason = '活动任务正在退出。'
+                updater.clear_block_during_stage = True
+                page.locator('#checkUpdate').click()
+                expect(page.locator('#stageUpdate')).to_be_enabled()
+                page.locator('#stageUpdate').click()
+                expect(page.locator('#updateStatus')).to_contain_text('本次只获准下载')
+                expect(page.locator('#restartUpdate')).to_be_enabled()
+                assert updater.calls[-1] == 'stage'
+                updater.clear_block_during_stage = False
+                page.locator('#rollbackUpdate').click()
+                expect(page.locator('#updateStatus')).to_contain_text('已取消待生效更新')
+
+                # A task can become unsafe after checking/downloading. Rejection keeps
+                # the staged candidate and offers a fresh explicit restart, not a retry.
+                updater.reject_restart = True
+                page.locator('#checkUpdate').click()
+                expect(page.locator('#stageUpdate')).to_be_enabled()
+                page.locator('#stageUpdate').click()
+                expect(page.locator('#updateError')).to_contain_text('重启被阻止')
+                expect(page.locator('#updateCurrent')).to_have_text('fixture-1')
+                expect(page.locator('#restartUpdate')).to_be_enabled()
+                rejected_calls = len(updater.calls)
+                updater.reject_restart = False
+                updater.outcome = 'rolled_back'
+                page.locator('#restartUpdate').click()
+                expect(page.locator('#updateError')).to_contain_text('健康检查失败', timeout=10000)
+                expect(page.locator('#updateStatus')).to_contain_text('服务已回退')
+                expect(page.locator('#updateCurrent')).to_have_text('fixture-1')
+                expect(page.locator('#reloadUpdate')).to_be_hidden()
+                assert len(updater.calls) == rejected_calls + 1
+
+                # A completed label alone is insufficient: both a wrong release hash
+                # and the old process identity must remain unverified until timeout.
+                page.clock.install()
+                for outcome in ('wrong_digest', 'wrong_instance'):
+                    updater.outcome = outcome
+                    page.locator('#checkUpdate').click()
+                    expect(page.locator('#stageUpdate')).to_be_enabled()
+                    page.locator('#stageUpdate').click()
+                    expect(page.locator('#updateStatus')).to_contain_text('尚未匹配目标', timeout=10000)
+                    expect(page.locator('#reloadUpdate')).to_be_hidden()
+                    mutation_count = len(updater.calls)
+                    page.clock.fast_forward(91000)
+                    expect(page.locator('#updateError')).to_contain_text('90 秒内未核实', timeout=10000)
+                    expect(page.locator('#retryReconnect')).to_be_visible()
+                    expect(page.locator('#stageUpdate')).to_be_disabled()
+                    screenshot('updates-unverified-'+outcome)
+                    updater.outcome = 'success'
+                    page.locator('#retryReconnect').click()
+                    expect(page.locator('#updateStatus')).to_contain_text('已验证目标版本 fixture-2', timeout=10000)
+                    assert len(updater.calls) == mutation_count, 'Reconnect must be read-only'
+                    page.locator('#rollbackUpdate').click()
+                    expect(page.locator('#updateStatus')).to_contain_text('已验证目标版本 fixture-1', timeout=10000)
+                page.clock.resume()
+
+                # Losing the POST response does not mean rejection. Reconnect, then
+                # reload mid-handoff; session recovery never resends the mutation.
+                updater.outcome = 'waiting'
+                page.locator('#checkUpdate').click()
+                expect(page.locator('#stageUpdate')).to_be_enabled()
+                def lose_restart_response(route):
+                    if route.request.method == 'POST' and route.request.post_data_json.get('action') == 'restart':
+                        response = route.fetch()
+                        assert response.ok
+                        route.abort('connectionreset')
+                    else:
+                        route.continue_()
+                page.route('**/api/update', lose_restart_response)
+                page.locator('#stageUpdate').click()
+                expect(page.locator('#updateStatus')).to_contain_text('等待服务重启', timeout=10000)
+                mutation_count = len(updater.calls)
+                page.reload()
+                expect(page.locator('#updateDialog')).to_be_visible()
+                expect(page.locator('#updateStatus')).to_contain_text('等待服务重启', timeout=10000)
+                page.goto('about:blank')
+                page.go_back()
+                expect(page.locator('#updateDialog')).to_be_visible()
+                expect(page.locator('#updateStatus')).to_contain_text('等待服务重启', timeout=10000)
+                updater.outcome = 'success'
+                expect(page.locator('#updateStatus')).to_contain_text('已验证目标版本 fixture-2', timeout=10000)
+                assert len(updater.calls) == mutation_count, 'Reload/Back recovery must not repeat restart'
+                page.unroute('**/api/update', lose_restart_response)
+                expect(page.locator('#reloadUpdate')).to_be_visible()
+                page.locator('#reloadUpdate').click()
                 expect(page.locator('#updateDialog')).not_to_be_visible()
-                updater.pending = False
+                expect(page.locator('#mapList [data-map-id]').first).to_be_visible()
+
+                # Check failures preserve actual running identity and remain retryable.
                 updater.fail = True
                 page.locator('#openUpdate').click()
                 expect(page.locator('#checkUpdate')).to_be_enabled()
                 page.locator('#checkUpdate').click()
                 expect(page.locator('#updateError')).to_contain_text('模拟下载源不可用')
-                expect(page.locator('#updateCurrent')).to_have_text('fixture-1')
+                expect(page.locator('#updateCurrent')).to_have_text('fixture-2')
                 updater.fail = False
-                expect(page.locator('#rollbackTarget')).to_contain_text('fixture-0')
+                page.locator('#backUpdate').click()
+                expect(page.locator('#updateDialog')).not_to_be_visible()
+
+                # Legacy/source modes never promise an unsupported automatic restart.
+                updater.supported = False
+                updater.block_reason = '旧启动器需要最后一次停止并启动 Nori，无需重新安装。'
+                page.locator('#openUpdate').click()
+                expect(page.locator('#updateBlock')).to_contain_text('最后一次')
+                expect(page.locator('#rollbackUpdate')).to_have_text('暂存上一版本')
                 page.locator('#rollbackUpdate').click()
-                expect(page.locator('#updateStatus')).to_contain_text('已暂存')
+                expect(page.locator('#updateStatus')).to_contain_text('无需重新安装')
+                expect(page.locator('#restartUpdate')).to_be_disabled()
                 assert updater.calls[-1] == 'rollback'
+                page.locator('#rollbackUpdate').click()
+                expect(page.locator('#updateStatus')).to_contain_text('已取消待生效更新')
                 page.locator('#closeUpdate').click()
                 updater.installed = False
                 page.set_viewport_size({'width':390,'height':844})
@@ -300,8 +605,10 @@ def main():
                 expect(page.locator('#metricTotal')).to_have_text('2')
                 expect(page.locator('#metricDone')).to_have_text('2')
                 screenshot('result')
+                verify_real_installed_restart(page, screenshot)
+                assert not errors, errors
                 browser.close()
-                print('Browser acceptance PASS: recursive CRUD, sibling/delete, pan/zoom/collapse, separate report and acceptance, confirmed-only decomposition, persistence; original requirements and kernel synthetic workflow retained.')
+                print('Browser acceptance PASS: synthetic update/restart confirmation, task blocks, rollback, identity verification, bounded reconnect, reload recovery and migration; recursive CRUD, sibling/delete, pan/zoom/collapse, separate report and acceptance, confirmed-only decomposition, persistence; original requirements and kernel synthetic workflow retained.')
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=3)
 
