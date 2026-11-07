@@ -39,6 +39,9 @@ class DistributionTests(unittest.TestCase):
 
             result = call(str(launcher), 'demo', str(root / 'synthetic'))
             self.assertEqual(result.returncode, 0, result.stderr)
+            result = call(str(launcher), 'boundary-demo', str(root / 'boundary-synthetic'))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('COMPLETED', result.stdout)
             installed = home / '.local/lib/nori/nori.pyz'
             script = '''import sys,time
 from pathlib import Path

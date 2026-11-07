@@ -28,6 +28,7 @@ def parser():
     x.add_argument('--port', type=int, default=8765)
     x.add_argument('--no-browser', action='store_true')
     x = sub.add_parser('demo'); x.add_argument('directory')
+    x = sub.add_parser('boundary-demo', help='Run only a disposable fixed-policy synthetic fixture'); x.add_argument('directory')
     sub.add_parser('example', help='Print an editable synthetic spec')
     for action in ('init','status','approve','run','probe','pause','resume','reconcile','verify','audit','finalize',
                    'rework','retry-verification','review-candidate','cancel','partial','propose','accept-revision',
@@ -100,6 +101,9 @@ def run_session(args):
 
 def execute(args):
     if args.action == 'demo': return run_demo(args.directory)
+    if args.action == 'boundary-demo':
+        from .boundary import run_synthetic_demo
+        return run_synthetic_demo(args.directory)
     if args.action == 'example': return example_spec()
     if args.action == 'run': return run_session(args)
     with Store(args.home, recover=args.action == 'recover', lock_timeout=2) as store:

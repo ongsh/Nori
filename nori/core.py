@@ -189,10 +189,27 @@ class Controller:
             return expected_digest
         return self.command(cid, rev, 'approve', expected_digest, apply)
 
+    def _validate_run_spec(self, s, run):
+        """Receipts and mutable run copies are evidence, not acceptance policy."""
+        tid = run.get('task_id')
+        constraints = {k: s['spec'].get(k, [] if k != 'operations' else {})
+                       for k in ('forbidden_actions', 'out_of_scope', 'read_scope', 'write_scope', 'operations')}
+        if (tid not in s['spec']['tasks']
+                or run.get('approval') != s['approval']
+                or s['approval'] != digest(s['spec'])
+                or run.get('plan_version') != s['plan_version']
+                or run.get('requirement_version') != s['requirement_version']
+                or run.get('task') != s['spec']['tasks'][tid]
+                or run.get('goal') != s['spec']['goal']
+                or run.get('requirements') != s['spec']['requirements']
+                or run.get('constraints') != constraints):
+            raise NoriError('Run does not match the current approved task')
+
     def _current(self, s, rid):
         if s['lease'] != rid or rid not in s['runs']:
             raise NoriError('Stale or inactive run')
         run = s['runs'][rid]
+        self._validate_run_spec(s, run)
         if s['tasks'][run['task_id']]['run_id'] != rid:
             raise NoriError('Stale task run')
         return run, s['tasks'][run['task_id']]

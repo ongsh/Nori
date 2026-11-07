@@ -300,6 +300,7 @@ then invalidate acceptance rather than trusting the rolled-back progress.
                 original = record.get('run')
                 if not original or original.get('task_id') not in s['tasks'] or original.get('approval') != s['approval']:
                     raise NoriError('Orphan execution cannot be matched to approved plan')
+                self._validate_run_spec(s, original)
                 s['runs'][rid] = copy.deepcopy(original)
             if s['runs'][rid]['identity'] != observed.get('identity'):
                 raise NoriError('Execution identity mismatch')
