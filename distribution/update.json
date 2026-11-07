@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "version": "1.0.6-preview",
-  "commit": "7bdaf82e82ed9d3b021434255b2a31f824cb777a",
-  "bundle_sha256": "96fb7ce84a4148f4ac8f6fd7f08bd91e5730f85bc7ea2a4b8df3524e59648395",
-  "bundle_size": 83945
+  "version": "1.0.7-preview",
+  "commit": "0825772cfd2c874aacd12b0c7bfa57288768e369",
+  "bundle_sha256": "4109a7057c628eb2d8aed7b6c253740056e77694746e3ed2b8ef42ee85061903",
+  "bundle_size": 94533
 }
