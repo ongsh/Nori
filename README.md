@@ -1,5 +1,7 @@
 # Nori
 
+**无需 clone 安装：** 下载私有 CI 的 `nori-linux-wsl2` 安装包，执行 `python3 nori.pyz --install`。详见 [安装、更新与卸载](docs/INSTALL.md)。需 Linux/WSL2 和 Python 3.11+，不支持原生 Windows。
+
 Nori 是本地、串行的工作控制框架：固定需求与计划，安排执行工序，持续监督，再根据独立证据决定是否交付。实现以《Agent Factory 1.0 系统架构与详细方案 v0.1》为基线。
 
 **当前状态：V1 框架功能已实现。本轮按用户要求只用合成任务和替身工具验收，不要求真实模型联调。** Codex 与 Claude Code 的官方 CLI 适配器已有实现。当前测试机 Codex 已安装并报告登录，但实际合成任务因其内部初始化遇到只读文件系统而退出；Claude CLI 未安装。这些真实环境情况不作为本轮模拟验收的阻碍，也不冒充真实模型联调通过。
