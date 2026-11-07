@@ -15,6 +15,24 @@ import time
 from .store import NoriError, atomic_write, canonical
 
 
+def _installation_lock_fds():
+    """Retain a managed launcher's lifecycle lease in detached Nori supervisors."""
+    value = os.environ.get('NORI_RUN_LOCK_FD')
+    if not value:
+        return ()
+    try:
+        fd = int(value)
+        path = Path.home() / '.local/lib/nori/run.lock'
+        if any(item.is_symlink() for item in (path, *path.parents)):
+            return ()
+        actual, expected = os.fstat(fd), path.stat()
+        if fd < 3 or (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+            return ()
+        return (fd,)
+    except (OSError, ValueError):
+        return ()
+
+
 def _positive_limit(value, name):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise NoriError(f'{name} must be a finite positive number')
@@ -115,7 +133,8 @@ class ProcessAdapter:
                   package_root, str(directory)]
         with open(directory / 'supervisor.log', 'ab') as log:
             child = subprocess.Popen(launch, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                     start_new_session=True, close_fds=True)
+                                     start_new_session=True, close_fds=True,
+                                     pass_fds=_installation_lock_fds())
         self._supervisors[run['run_id']] = child
         return self.reconcile(run['run_id'])
 

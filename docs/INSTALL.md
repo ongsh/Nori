@@ -35,13 +35,13 @@ This creates only synthetic tasks in a fresh temporary directory. For persistent
 
 ## Updates and removal
 
-To update, first stop active Nori runs and close controllers, then run the new trusted package with `python3 nori.pyz --install` again. It replaces only the managed program and launcher. It refuses unrelated files named `nori`. It does not migrate project state or automatically upgrade while tasks are running. The launcher uses the Python interpreter that performed installation; reinstall if you remove or relocate that interpreter.
+For installations with managed updates, use the Web “版本与更新” panel: explicitly check, confirm the shown version, download and verify, then stop the old server and rerun `~/.local/bin/nori`. No long installation command is needed for subsequent updates. Activation is deferred until a safe next launch. See [update lifecycle and trust limits](UPDATES.md). The first upgrade from an older unmanaged installer still requires the supplied fixed-commit installation command. The launcher uses the Python interpreter that performed installation; retain that interpreter.
 
 ```sh
 ~/.local/bin/nori --uninstall
 ```
 
-This removes `~/.local/lib/nori/nori.pyz` and `~/.local/bin/nori` only. It retains all project/control data and empty installation directories. You may delete the original downloaded package after installation.
+This removes managed program/launcher files and managed update archives, while retaining project/control data. It refuses unrelated files. Stop active processes before removal. You may delete the original downloaded package after installation.
 
 ## Maintainer build
 

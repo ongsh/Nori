@@ -22,7 +22,7 @@ from .prototype import PrototypeStore
 
 
 class WebApp:
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, updater=None):
         self.root = Path(data_dir).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.token = secrets.token_urlsafe(32)
@@ -31,6 +31,21 @@ class WebApp:
         self.lock = threading.RLock()
         self.closing = threading.Event()
         self.prototypes = PrototypeStore(self.root)
+        if updater is None:
+            from . import updater
+        self.updater = updater
+
+    def update_action(self, body):
+        action = body.get('action')
+        if action == 'check':
+            return self.updater.check()
+        if action not in ('stage', 'rollback'):
+            raise NoriError('未知更新操作')
+        if body.get('confirmed') is not True:
+            raise NoriError('需要明确确认更新或回退')
+        if action == 'stage':
+            return self.updater.stage_update(expected_commit=body.get('commit'), expected_manifest=body.get('manifest_digest'))
+        return self.updater.stage_rollback(expected_state=body.get('rollback_token'))
 
     def map_action(self, body):
         action = body.get('action')
@@ -234,8 +249,8 @@ class LocalServer(ThreadingHTTPServer):
         super().server_close()
 
 
-def create_server(data_dir, port=0):
-    app = WebApp(data_dir)
+def create_server(data_dir, port=0, *, updater=None):
+    app = WebApp(data_dir, updater=updater)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
 
@@ -268,6 +283,7 @@ def create_server(data_dir, port=0):
             if not self.allowed(): return
             try:
                 if self.path == '/': self.send(200, HTML.replace('__NONCE__', app.nonce), html=True)
+                elif self.path == '/api/update': self.send(200, app.updater.status())
                 elif self.path == '/api/projects':
                     names = [p.name for p in sorted(app.root.iterdir()) if p.is_dir() and not p.is_symlink() and (p / 'control' / 'state.json').is_file()]
                     self.send(200, {'projects': names})
@@ -289,6 +305,8 @@ def create_server(data_dir, port=0):
                 if not 0 < size <= 2 * 1024 * 1024: raise NoriError('Request must be 1..2097152 bytes')
                 body = json.loads(self.rfile.read(size))
                 if not isinstance(body, dict): raise NoriError('JSON object required')
+                if self.path == '/api/update':
+                    self.send(200, app.update_action(body)); return
                 if self.path == '/api/map':
                     self.send(200, app.map_action(body)); return
                 if self.path == '/api/draft':
@@ -327,7 +345,7 @@ HTML = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta n
 #prototypeGraph .mind-node{padding:8px 10px;width:188px;line-height:1.25}#prototypeGraph .mind-node strong{font-size:13px;line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#prototypeGraph .nodemeta{margin-top:2px;line-height:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#prototypeGraph .nodestatus{margin-top:3px;padding:1px 4px;line-height:12px}#prototypeGraph .nodeverdicts{display:flex;gap:6px;margin-top:3px;line-height:12px}#prototypeGraph .nodeverdicts span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:9px;margin:0}#prototypeGraph .tree-children{gap:9px}#prototypeGraph .root-node{padding:10px}
 </style></head><body><div class="app">
 <aside class="sidebar"><div class="brand"><span class="logo">n</span>nori<span class="pill" style="margin-left:auto">预览</span></div><button class="new" id="newChat">＋ &nbsp; 发起需求</button><div class="navlabel">脑图项目</div><div id="mapNav" class="navlist"></div><div class="navlabel">原始需求</div><div id="draftList" class="navlist"><small style="padding:10px">还没有需求记录</small></div><div class="navlabel" style="margin-top:16px">执行项目</div><div id="projectList" class="navlist"></div><div class="sidebottom"><small><span class="dot"></span>本机工作区</small><br><small>项目经理工作台 · 本地预览</small><div class="footerlabel">NORI / LOCAL WORKSPACE</div></div></aside>
-<main class="center"><header class="topbar"><div class="crumb"><span style="color:#a6adb5">⌘</span><span id="conversationTitle">需求中心</span><span class="pill" id="modeLabel">需求草稿</span></div><div style="display:flex;align-items:center;gap:12px"><span class="muted">需求 / 工作包 / 监督 / 验收</span><button id="toggleContext" aria-label="显示或隐藏任务概览" title="任务概览">◫</button></div></header><div id="notice" role="alert"></div><div class="scroll" id="feed">
+<main class="center"><header class="topbar"><div class="crumb"><span style="color:#a6adb5">⌘</span><span id="conversationTitle">需求中心</span><span class="pill" id="modeLabel">需求草稿</span></div><div style="display:flex;align-items:center;gap:12px"><span class="muted">需求 / 工作包 / 监督 / 验收</span><button id="openUpdate" aria-haspopup="dialog">检查更新</button><button id="toggleContext" aria-label="显示或隐藏任务概览" title="任务概览">◫</button></div></header><div id="notice" role="alert"></div><div class="scroll" id="feed">
 <div class="dashboardhead"><div><div class="eyebrow">PROJECT CONTROL CENTER</div><h1>需求与任务图谱</h1><p class="muted" id="dashboardSubtitle">从一个大目标展开工作包，把分工、依赖和验收放在同一张图里。</p></div><div class="toolbar"><button id="showPrototype">原型脑图</button><button id="showDemo">体验模拟项目</button><button class="primary" id="writeIdea">＋ 发起需求</button></div></div>
 <div class="dashboardtabs"><span class="selected">概览</span><span>需求 · 工作包 · 风险与证据</span></div>
 <section id="mapLibrary" class="panel"><div class="sectionhead"><div><h2>脑图与项目</h2><p class="muted">先打开一个项目，直接在图上拆分、编辑并追踪节点。</p></div><button id="newMap" class="primary">＋ 新建脑图</button></div><p class="map-list-summary">你的修改会保存在本机。模拟 Agent 自报与模拟验收分开记录；不会启动真实 Agent 或修改 Nori 内核。</p><div id="mapList" class="mapgrid"></div></section><section id="prototypeBoard" class="panel mindboard" hidden><div class="mindheader"><div><h2 id="mapTitle">Nori 自我迭代</h2><p class="prototypegoal">可操作原型 · 手动拆分与修改会保存到本机</p><span class="prototypewarning">交互原型示例 · 不代表真实执行 · 不会自动修改自身</span></div><div class="graph-toolbar"><button id="backMaps">← 项目列表</button><button id="graphZoomOut" aria-label="缩小脑图">−</button><span id="zoomLabel" class="muted">100%</span><button id="graphZoomIn" aria-label="放大脑图">＋</button><button id="graphFit">适配</button><button id="collapseGraph">收起子任务</button></div></div><div class="mindviewport" id="prototypeViewport"><div id="prototypeGraph" class="mindtree"></div></div><div class="graphlegend"><span>── 实线：需求分解（不是执行顺序）</span><span>┄ 依赖：单独以文字标签说明</span><span>拖动空白处平移 · 点击节点编辑 · 原型模拟状态不改变真实内核验收</span></div></section><div id="welcome"><details><summary>本地需求清单（已保存记录）</summary><section class="panel"><div class="sectionhead"><h2>需求清单</h2><span id="requirementCount" class="muted">正在加载本地记录</span></div><div class="tablewrap"><table class="pm-table"><thead><tr><th>需求 / 目标</th><th>状态</th><th>最近更新</th><th>操作</th></tr></thead><tbody id="requirementRows"></tbody></table></div><div id="requirementsEmpty" class="emptyboard" hidden>还没有需求。<br>点击“发起需求”，保存目标、交付物和约束。<br>自动拆解与指派 Agent 尚未接入，不会隐式启动任务。</div></section></details></div>
@@ -341,7 +359,19 @@ HTML = r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta n
 <div class="advanced"><details><summary>高级 · 编辑计划、人工验收与运行历史</summary><p class="muted">草稿修改未提交不生效。提交修订后需要再次批准；不会自动覆盖当前计划。</p><textarea id="spec" aria-label="计划 JSON" rows="10"></textarea><input type="file" id="import" accept=".json,application/json"><button id="propose">提交为修订提案</button><details><summary>人工验收 / 返工</summary><input id="task" placeholder="任务 ID"><input id="requirement" placeholder="要求 ID"><input id="reason" placeholder="实际检查结论或操作原因"><button id="binding">读取验收绑定</button><select id="verdict"><option>PASS</option><option>FAIL</option></select><button id="manual">提交人工验收</button><button id="rework">授权返工</button><button id="retry">重试验收</button><pre id="bindingView"></pre></details><details><summary>完整状态 / 运行历史</summary><pre id="raw"></pre></details></details></div></div>
 </div></main>
 <aside class="right"><h2>节点详情</h2><div id="nodeDetails" class="node-detail">选择脑图节点查看详情。</div><div class="rsection"><h2>决策与监督</h2></div><span class="pill" id="overviewState">等待输入</span><div class="rsection"><h2>待决策</h2><div id="decisionQueue" class="empty">选择需求或项目后显示真实待办。</div></div><div class="rsection"><h2>偏离风险</h2><div id="riskList" class="empty">尚无执行记录，不能判断是否跑偏。</div><p class="contextmini">只展示已记录检查与验收发现。不代表持续语义监控，也不保证不存在偏离。</p></div><details><summary>阶段状态</summary><div class="rsection" style="border-top:0"><div class="progressrow"><span class="circle now" id="p1">1</span>记录需求</div><div class="progressrow"><span class="circle" id="p2">2</span>确认计划</div><div class="progressrow"><span class="circle" id="p3">3</span>执行任务</div><div class="progressrow"><span class="circle" id="p4">4</span>独立验收</div></div></details><div class="rsection"><h2>计划输出</h2><div id="files" class="empty">计划确认后，这里会显示<br>任务允许生成的文件。</div></div><div class="rsection"><h2>验收证据</h2><div id="acceptance" class="empty">还没有执行结果。<br>需求草稿不代表任务已经完成。</div></div><div class="rsection"><h2>工作区</h2><div id="workspace" class="empty">独立本机目录<br>当前不能选择任意已有工程。</div><details><summary>本地数据位置</summary><div id="dataLocation" class="empty" style="overflow-wrap:anywhere"></div></details></div><div class="tip" id="contextTip">先说清楚你想得到什么。<br>原始需求会保留下来，后续实现可以逐步完善。</div></aside>
-</div><script nonce="__NONCE__">
+</div>
+<style>.topbar .crumb{min-width:0}.topbar>div:last-child{flex-shrink:0}#openUpdate{white-space:nowrap}#updateDialog::backdrop{background:#17282055}@media(max-width:600px){.topbar{gap:8px;padding:0 12px}.topbar .crumb{gap:6px}.topbar .pill{display:none}#conversationTitle{max-width:135px}}</style>
+<dialog id="updateDialog" aria-labelledby="updateTitle" style="width:min(540px,calc(100vw - 28px));max-height:90dvh;overflow:auto;border:1px solid #dce2df;border-radius:14px;padding:24px">
+<div class="sectionhead"><h2 id="updateTitle">Nori 软件更新</h2><button id="closeUpdate" aria-label="关闭更新面板">关闭</button></div>
+<p>当前版本：<strong id="updateCurrent">读取中</strong><br>目标版本：<strong id="updateTarget">尚未检查</strong></p>
+<p id="updateCommit" class="muted" style="overflow-wrap:anywhere"></p><p id="rollbackTarget" class="muted"></p>
+<p class="muted">仅从固定官方仓库检查版本，下载经固定提交和摘要核验的版本。校验不等于独立安全审计，仍需信任仓库维护者。不会静默更新，不会申请管理员权限。</p>
+<p class="muted">更新只暂存下一次启动使用的程序，不替换正在运行的版本，也不自动重启。准备好后，请先停止旧 Nori，再重新运行启动器以激活。失败保留当前版本；项目数据不随程序回退。</p>
+<p id="updateStatus" role="status" aria-live="polite"></p>
+<p id="updateError" role="alert" style="color:#a64332"></p>
+<div class="toolbar"><button id="checkUpdate">检查新版本</button><button id="stageUpdate" class="primary" disabled>确认下载更新</button><button id="rollbackUpdate" disabled>回退上一版本</button><button id="backUpdate">返回工作台</button></div>
+<p class="muted">关闭面板不会丢失当前工作，也不会取消已开始的下载。</p>
+</dialog><script nonce="__NONCE__">
 const TOKEN=new URLSearchParams(location.hash.slice(1)).get('token')||'';let current='',snapshot=null,draft=null,binding=null,busy=false,mapProject=null,selectedMapNode=null;
 const $=id=>document.getElementById(id),pretty=x=>JSON.stringify(x,null,2),labels={AWAITING_APPROVAL:'等待批准计划',ACTIVE:'已批准',PAUSED:'已暂停',COMPLETED:'全部验收通过',AWAITING_DECISION:'需要你决定下一步',CANCELLED:'已取消',CLOSED_PARTIAL:'已部分结束',PENDING:'等待执行',REWORK:'验收失败，待返工',DONE:'验收通过',IN_PROGRESS:'执行中',IMPLEMENTED:'待验收',BLOCKED:'暂时阻塞',READY:'准备就绪',PASS:'通过',FAIL:'失败',INCONCLUSIVE:'尚不能确定'};const label=x=>labels[x]||x;
 async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',headers:{'X-Nori-Token':TOKEN,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});const x=await r.json();if(!r.ok)throw Error(x.error);return x}
@@ -398,5 +428,15 @@ $('controls').onclick=e=>{const action=e.target.dataset.action;if(!action)return
 $('repairExample').onclick=()=>guard(()=>cmd('repair-example'));$('propose').onclick=()=>guard(async()=>{const reason=prompt('修订原因');if(reason)await cmd('propose',{proposal:'revision-'+Date.now(),spec:JSON.parse($('spec').value),reason})});$('import').onchange=()=>guard(async()=>{$('spec').value=await $('import').files[0].text();JSON.parse($('spec').value)});
 function fields(){return {task:$('task').value,requirement:$('requirement').value,reason:$('reason').value}}
 $('binding').onclick=()=>guard(async()=>{let x=await cmd('manual-binding',fields());binding=x.result.binding;$('bindingView').textContent=pretty(x.result)});$('manual').onclick=()=>guard(()=>cmd('manual',{...fields(),binding,verdict:$('verdict').value}));$('rework').onclick=()=>guard(()=>cmd('rework',fields()));$('retry').onclick=()=>guard(()=>cmd('retry-verification',fields()));
+
+let updateState=null,updateBusy=false;
+function renderUpdate(){const u=updateState||{};$('updateCurrent').textContent=u.current_version||'未知';$('updateCommit').textContent=u.commit?'发布提交：'+u.commit:'';$('updateTarget').textContent=u.latest_version||u.next_version||'尚未检查';$('updateStatus').textContent=u.message||(u.installed===false?'源码运行不支持自更新，请使用独立启动器安装。':u.pending?'已暂存。请停止旧 Nori，再重新运行启动器激活。':u.latest_version?(u.update_available?'发现新版本；请确认后下载。':'检查完成，当前无需更新。'):'点击检查新版本后，再决定是否下载。');$('checkUpdate').disabled=updateBusy||u.installed===false;$('stageUpdate').disabled=updateBusy||u.installed===false||!u.update_available||u.pending;$('rollbackUpdate').disabled=updateBusy||u.installed===false||!(u.pending||u.rollback_available);$('rollbackUpdate').textContent=u.pending?'取消待生效更新':'回退到上一版';$('rollbackTarget').textContent=u.rollback_target_version?(u.pending?'取消后继续使用：':'回退目标：')+u.rollback_target_version:'';}
+async function updateRequest(action){if(updateBusy)return;updateBusy=true;$('updateError').textContent='';renderUpdate();$('updateStatus').textContent=action==='check'?'正在检查版本…':action==='stage'?'正在下载并校验，当前版本继续运行…':action==='rollback'?'正在准备回退…':'正在读取版本…';try{updateState=await api('/api/update',action?{action,...(action==='stage'?{commit:updateState.commit,manifest_digest:updateState.manifest_digest}:{}),...(action==='rollback'?{rollback_token:updateState.rollback_token}:{}),...(action==='stage'||action==='rollback'?{confirmed:true}:{})}:undefined)}catch(e){$('updateError').textContent='操作失败，当前版本保留：'+e.message}finally{updateBusy=false;renderUpdate()}}
+$('openUpdate').onclick=()=>{$('updateDialog').showModal();if(!updateBusy)updateRequest()};
+$('closeUpdate').onclick=$('backUpdate').onclick=()=>$('updateDialog').close();
+$('checkUpdate').onclick=()=>updateRequest('check');
+$('stageUpdate').onclick=()=>{if(!updateBusy&&updateState?.update_available&&confirm('确认下载 '+updateState.latest_version+'？仅暂存下次启动版本。请先停止旧 Nori，再重新运行启动器。'))updateRequest('stage')};
+$('rollbackUpdate').onclick=()=>{const u=updateState;if(!updateBusy&&u&&(u.pending||u.rollback_available)&&confirm(u.pending?'确认取消待生效更新？继续使用 '+u.rollback_target_version+'。':'确认回退到 '+u.rollback_target_version+'？停止旧 Nori 后重新运行启动器生效，项目数据不会回退。'))updateRequest('rollback')};
+
 guard(async()=>{const info=await api('/api/info');$('dataLocation').textContent=info.data_dir;await list();await showMaps()});setInterval(async()=>{if(current&&!busy){try{await refresh()}catch(e){note(e.message)}}},1500);
 </script></body></html>'''

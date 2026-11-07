@@ -2,27 +2,76 @@
 from pathlib import Path
 import base64
 import sys
+import shutil
 import tempfile
 import threading
+import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from nori.web import create_server
 from playwright.sync_api import sync_playwright, expect
 
 
+class FixtureUpdater:
+    """Synthetic updater: never connects to a network or replaces executable files."""
+    def __init__(self):
+        self.pending = False
+        self.installed = True
+        self.fail = False
+        self.calls = []
+
+    def status(self):
+        return dict(installed=self.installed, current_version='fixture-1', pending=self.pending,
+                    rollback_available=True, next_version='fixture-2' if self.pending else None,
+                    previous_version='fixture-0', pending_version='fixture-2' if self.pending else None,
+                    rollback_action='cancel_pending' if self.pending else 'rollback',
+                    rollback_target_version='fixture-1' if self.pending else 'fixture-0',
+                    rollback_token='pending-token' if self.pending else 'current-token')
+
+    def check(self):
+        self.calls.append('check')
+        time.sleep(.4)
+        if self.fail:
+            raise RuntimeError('模拟下载源不可用')
+        return dict(self.status(), latest_version='fixture-2', commit='a'*40,
+                    manifest_digest='b'*64, update_available=True)
+
+    def stage_update(self, expected_commit=None, expected_manifest=None):
+        assert expected_commit == 'a'*40 and expected_manifest == 'b'*64
+        self.calls.append('stage')
+        time.sleep(.4)
+        self.pending = True
+        return self.status()
+
+    def stage_rollback(self, expected_state=None):
+        assert expected_state == self.status()['rollback_token']
+        self.calls.append('cancel_pending' if self.pending else 'rollback')
+        self.pending = not self.pending
+        return self.status()
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix='nori-browser-') as directory:
-        server = create_server(Path(directory) / 'data', port=0)
+        updater = FixtureUpdater()
+        server = create_server(Path(directory) / 'data', port=0, updater=updater)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch()
+                browser = p.chromium.launch(executable_path=shutil.which('chromium') or None)
                 page = browser.new_page(viewport={'width':1440,'height':1000})
                 errors = []
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 prompt_answers = []
-                page.on('dialog', lambda dialog: dialog.accept(prompt_answers.pop(0) if prompt_answers else 'Synthetic repair') if dialog.type == 'prompt' else dialog.accept())
+                confirm_answers = []
+                def handle_dialog(dialog):
+                    if dialog.type == 'prompt':
+                        dialog.accept(prompt_answers.pop(0) if prompt_answers else 'Synthetic repair')
+                    elif confirm_answers and not confirm_answers.pop(0):
+                        dialog.dismiss()
+                    else:
+                        dialog.accept()
+                page.on('dialog', handle_dialog)
                 def screenshot(name):
                     Path('dist').mkdir(exist_ok=True)
                     data = page.screenshot(type='jpeg', quality=75, animations='disabled')
@@ -30,6 +79,56 @@ def main():
                     print('NORI_SCREENSHOT_'+name.upper()+'=' + base64.b64encode(data).decode())
                 page.goto(f'http://127.0.0.1:{server.server_port}/#token={server.app.token}')
                 expect(page.locator('#mapList [data-map-id]').first).to_be_visible()
+                assert not updater.calls, 'Startup must not check or download updates'
+                page.locator('#openUpdate').click()
+                expect(page.locator('#updateDialog')).to_be_visible()
+                expect(page.locator('#updateCurrent')).to_have_text('fixture-1')
+                expect(page.locator('#stageUpdate')).to_be_disabled()
+                assert not updater.calls, 'Opening panel must be local-only'
+                page.locator('#checkUpdate').click()
+                expect(page.locator('#checkUpdate')).to_be_disabled()
+                expect(page.locator('#updateTarget')).to_have_text('fixture-2')
+                expect(page.locator('#stageUpdate')).to_be_enabled()
+                assert updater.calls == ['check'], 'Checking must not download'
+                expect(page.locator('#updateCommit')).to_contain_text('a'*40)
+                screenshot('updates')
+                confirm_answers.append(False)
+                page.locator('#stageUpdate').click()
+                assert updater.calls == ['check'], 'Cancelled confirmation must not download'
+                page.locator('#stageUpdate').click()
+                expect(page.locator('#stageUpdate')).to_be_disabled()
+                expect(page.locator('#updateStatus')).to_contain_text('已暂存')
+                expect(page.locator('#updateCurrent')).to_have_text('fixture-1')
+                assert updater.calls == ['check', 'stage']
+                expect(page.locator('#rollbackUpdate')).to_have_text('取消待生效更新')
+                expect(page.locator('#rollbackTarget')).to_contain_text('fixture-1')
+                page.locator('#rollbackUpdate').click()
+                expect(page.locator('#rollbackUpdate')).to_have_text('回退到上一版')
+                assert updater.calls[-1] == 'cancel_pending'
+                page.locator('#backUpdate').click()
+                expect(page.locator('#updateDialog')).not_to_be_visible()
+                updater.pending = False
+                updater.fail = True
+                page.locator('#openUpdate').click()
+                expect(page.locator('#checkUpdate')).to_be_enabled()
+                page.locator('#checkUpdate').click()
+                expect(page.locator('#updateError')).to_contain_text('模拟下载源不可用')
+                expect(page.locator('#updateCurrent')).to_have_text('fixture-1')
+                updater.fail = False
+                expect(page.locator('#rollbackTarget')).to_contain_text('fixture-0')
+                page.locator('#rollbackUpdate').click()
+                expect(page.locator('#updateStatus')).to_contain_text('已暂存')
+                assert updater.calls[-1] == 'rollback'
+                page.locator('#closeUpdate').click()
+                updater.installed = False
+                page.set_viewport_size({'width':390,'height':844})
+                expect(page.locator('#openUpdate')).to_be_visible()
+                page.locator('#openUpdate').click()
+                expect(page.locator('#updateStatus')).to_contain_text('源码运行不支持自更新')
+                expect(page.locator('#checkUpdate')).to_be_disabled()
+                page.keyboard.press('Escape')
+                expect(page.locator('#updateDialog')).not_to_be_visible()
+                page.set_viewport_size({'width':1440,'height':1000})
                 screenshot('projects')
                 page.locator('#mapList [data-map-id="nori-example"]').click()
                 expect(page.locator('#prototypeBoard')).to_be_visible()
@@ -95,6 +194,9 @@ def main():
                 page.locator('#newChat').click()
                 requirement = '做一个本地阅读清单，记录书名和阅读状态。先保存需求，不要执行。'
                 page.locator('#prompt').fill(requirement)
+                page.locator('#openUpdate').click()
+                page.locator('#backUpdate').click()
+                expect(page.locator('#prompt')).to_have_value(requirement)
                 page.locator('#saveDraft').click()
                 expect(page.locator('#messages')).to_contain_text(requirement)
                 expect(page.locator('#messages')).to_contain_text('尚未规划')

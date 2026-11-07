@@ -53,6 +53,48 @@ class WebTests(unittest.TestCase):
         self.assertEqual(status, 200, result)
         return result
 
+    def test_update_auth_confirmation_and_no_implicit_network(self):
+        from unittest.mock import Mock
+        updater = Mock()
+        updater.status.return_value = {'installed': True, 'current_version': '1'}
+        updater.check.return_value = {'installed': True, 'current_version': '1',
+                                     'latest_version': '2', 'commit': 'a'*40,
+                                     'manifest_digest': 'b'*64, 'update_available': True}
+        updater.stage_update.return_value = {'pending': True, 'current_version': '1'}
+        updater.stage_rollback.return_value = {'pending': True, 'current_version': '1'}
+        self.server.app.updater = updater
+        self.assertEqual(self.request('/api/update')[0], 200)
+        updater.check.assert_not_called()
+        updater.stage_update.assert_not_called()
+        for action in ('check', 'stage', 'rollback'):
+            for headers in ({'X-Nori-Token': ''}, {'Host': 'evil.example'},
+                            {'Origin': 'https://evil.example'}):
+                self.assertEqual(self.request('/api/update', {'action': action, 'confirmed': True}, headers)[0], 403)
+        updater.check.assert_not_called()
+        for action in ('stage', 'rollback'):
+            for confirmed in (None, False, 'true', 1):
+                self.assertEqual(self.request('/api/update', {'action': action, 'confirmed': confirmed})[0], 400)
+        updater.stage_update.assert_not_called()
+        updater.stage_rollback.assert_not_called()
+        self.assertEqual(self.request('/api/update', {'action': 'check'})[0], 200)
+        updater.check.assert_called_once_with()
+        self.assertEqual(self.request('/api/update', {'action': 'stage', 'confirmed': True,
+            'commit': 'a'*40, 'manifest_digest': 'b'*64})[0], 200)
+        updater.stage_update.assert_called_once_with(expected_commit='a'*40, expected_manifest='b'*64)
+        self.assertEqual(self.request('/api/update', {'action': 'rollback', 'confirmed': True, 'rollback_token': 'state-1'})[0], 200)
+        updater.stage_rollback.assert_called_once_with(expected_state='state-1')
+        updater.stage_rollback.side_effect = RuntimeError('更新状态已改变，请重新打开更新面板')
+        code, result = self.request('/api/update', {'action': 'rollback', 'confirmed': True, 'rollback_token': 'stale'})
+        self.assertEqual(code, 400)
+        self.assertIn('状态已改变', result['error'])
+        updater.check.side_effect = RuntimeError('校验失败')
+        code, result = self.request('/api/update', {'action': 'check'})
+        self.assertEqual(code, 400)
+        self.assertIn('校验失败', result['error'])
+        self.assertEqual(self.request('/api/update')[1]['current_version'], '1')
+        self.assertEqual(self.request('/api/update', {'action': 'arbitrary'})[0], 400)
+        self.assertEqual(self.request('/api/update', headers={'X-Nori-Token': ''})[0], 403)
+
     def test_invalid_import_does_not_reserve_project_name(self):
         status, _ = self.request('/api/command', {'project':'simulation','action':'create','spec':{'goal':''}})
         self.assertEqual(status, 400)
