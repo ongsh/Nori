@@ -1,3 +1,64 @@
 # Nori
 
-Nori is a local control core for running and independently verifying agent tasks.
+Nori 是一个本地、串行、带独立验收的工作控制核心。这是设计稿的 **P1 最小框架**，不是已接入 Claude Code / Codex 的完整生产系统。
+
+## 立即运行
+
+需要 Python 3.11+、POSIX 环境（本轮在 Linux / Python 3.12 验证），不安装第三方依赖：
+
+```sh
+python -m unittest discover -s tests -v
+python -m nori demo /tmp/nori-first-demo
+python -m nori status /tmp/nori-first-demo/control
+```
+
+演示目录必须是新的。演示仅在指定目录的 `work/` 写入两个文本文件，不调用真实模型、网络、游戏工程、SVN 或部署工具。
+
+预期过程：
+
+1. 批准固定版本的需求和计划。
+2. A 只写 `alpha`，漏掉 `beta`，却自报 `DONE`。
+3. 独立验收直接读取批准要求和实际文件，判 `FAIL`；B 仍不能开工。
+4. A 以新 `run_id` 返工，补齐后 `PASS`。
+5. B 读取已验收的 A，生成 `summary` 文本并通过。
+6. 整体验收再次核对两个文件和前置任务，项目才标为 `COMPLETED`。
+
+每次验收的真实输出、文件 SHA-256、固定版本和限制都保存在 `control/state.json`。`progress.md` 与 `events.jsonl` 是可重建的视图，不是第二份真相源。`status` 显示的是已记录状态，不代表外部文件从未再改变；控制器在派发、审计和整体验收时重新核对。
+
+## 已实现的边界
+
+- 需求与初始计划整体摘要审批；覆盖检查、依赖环检查、路径及写入范围检查。
+- `command_id` 去重、预期修订号冲突检查；重复编号换载荷被拒绝。
+- 控制目录与工作副本各有 POSIX 独占锁，进程内也串行化控制操作。
+- 先持久保存 `PREPARED` 运行意图，再持久保存调用保留状态，最后调用适配器。恢复不会猜测或重复启动不明运行。
+- 单工作副本只有一个运行许可；停止请求不是退出确认，验收完成前不派发第二个任务。
+- 模拟适配器用持久运行标识核对，不把 PID 当作身份。保留 `RUNNING`、`STOP_REQUESTED`、`EXITED`、`UNKNOWN`。
+- 自报完成只能成为待验收候选；验收有 `PASS / FAIL / INCONCLUSIVE`。旧运行结果不得覆盖新尝试。
+- 证据绑定原始要求、任务与计划版本、运行和文件摘要。文件或前置依赖变化使后续证据失效。
+- 默认三次实现尝试；超限停止，保留失败证据。任务通过不等于项目完成。
+- 同文件系统临时写入、fsync、校验和、上一版备份、原子替换；视图写入失败不回滚正式状态。
+
+## 恢复与暂停
+
+通过 Python API 使用 `Controller.pause / reconcile / authorize_rework / resume`；已确认退出且验收不确定的任务，需本地用户检查成果并提供返工理由，才允许新尝试。参见 `tests/test_core.py` 的完整例子。P1 CLI 只提供演示、状态和保守备份恢复，没有尚未实现的真实工具控制按钮。
+
+原始状态损坏或丢失时默认拒绝启动。可显式运行：
+
+```sh
+python -m nori recover /path/to/control
+```
+
+仅当有有效备份时恢复，并**始终锁为待人工核对**。不会从旧备份自动释放运行许可或重新开工。此版没有自动清除恢复阻塞的命令，也不会回滚、重置或删除业务文件。若原控制器已启动过执行且状态不明，必须人工核对；不能靠新建控制目录绕开。
+
+## 明确未完成
+
+- Claude Code / Codex 真实适配器、真实模型成本和取消进程树验证。
+- Windows 原生锁及 Windows/WSL 跨环境恢复测试。
+- Unity、Lua→C#、真实 SVN 工程或通用语义完整性验证。
+- 完整规划器、动态需求变更、多项目服务、Web、并行调度。
+- 任意同账户恶意代码的强隔离。Python API 只供受信任的本地控制程序调用；没有提供给模型的审批接口，也不信任输入的 `actor` 字段。校验和用于发现损坏，不是签名或权限边界。
+- 所有硬件掉电情形的保证。已测试进程强杀和注入写入失败，不能据此宣称任意磁盘/硬件故障安全。
+
+`MockAdapter.confirm_stopped` 是测试中的退出观察模拟，不是可用于真实进程的停止证明。模拟工作副本只应包含小型临时文件；当前完整摘要不适用于大型 Unity 仓库。
+
+更多设计映射与验证范围见 [docs/P1.md](docs/P1.md)。
