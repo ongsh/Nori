@@ -70,7 +70,7 @@ class UpdaterTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.stage(b'not the released bundle')
         self.assertEqual(updater.state(), before)
-        self.assertIn('1.0.1-preview', self.launch().stdout)
+        self.assertIn('1.0.2-preview', self.launch().stdout)
 
     def test_stage_activate_and_rollback_preserves_bytes_and_data(self):
         before = updater.state()['current']
@@ -81,7 +81,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn('1.0.2-test', self.launch().stdout)
         self.assertEqual(updater.state()['previous'], before)
         updater.stage_rollback(updater.status()['rollback_token'])
-        self.assertIn('1.0.1-preview', self.launch().stdout)
+        self.assertIn('1.0.2-preview', self.launch().stdout)
         self.assertEqual(data.read_text(), 'retain me')
         self.assertTrue((updater.root()/'releases'/(self.item['bundle_sha256']+'.pyz')).exists())
 
@@ -90,7 +90,7 @@ class UpdaterTests(unittest.TestCase):
         try:
             fcntl.flock(lock, fcntl.LOCK_SH)
             self.stage()
-            self.assertIn('1.0.1-preview', self.launch().stdout)
+            self.assertIn('1.0.2-preview', self.launch().stdout)
             self.assertTrue(updater.state()['pending'])
         finally:
             os.close(lock)
@@ -102,7 +102,7 @@ class UpdaterTests(unittest.TestCase):
         path.write_bytes(b'corrupted')
         result = self.launch()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('1.0.1-preview', result.stdout)
+        self.assertIn('1.0.2-preview', result.stdout)
         self.assertIn('not activated', result.stderr)
 
     def test_cancel_pending_and_refuse_symlink(self):
@@ -139,7 +139,7 @@ class UpdaterTests(unittest.TestCase):
         self.launch()
         result = subprocess.run([str(self.launcher), '--rollback'], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('1.0.1-preview', self.launch().stdout)
+        self.assertIn('1.0.2-preview', self.launch().stdout)
 
     def test_live_installed_process_retains_shared_lock(self):
         server = subprocess.Popen([str(self.launcher), 'web', '--port', '0', '--no-browser', '--data-dir', str(self.home/'web')], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -156,7 +156,7 @@ class UpdaterTests(unittest.TestCase):
             self.assertIn('Close all other Nori', blocked.stderr)
             self.assertTrue(self.launcher.exists())
             self.stage()
-            self.assertIn('1.0.1-preview', self.launch().stdout)
+            self.assertIn('1.0.2-preview', self.launch().stdout)
         finally:
             server.terminate(); server.communicate(timeout=10)
         self.assertIn('1.0.2-test', self.launch().stdout)
@@ -164,7 +164,7 @@ class UpdaterTests(unittest.TestCase):
     def test_reinstall_repairs_missing_launcher_after_partial_install(self):
         self.launcher.unlink()
         install(self.home/'download/nori.pyz')
-        self.assertIn('1.0.1-preview', self.launch().stdout)
+        self.assertIn('1.0.2-preview', self.launch().stdout)
 
     def test_cancel_during_download_wins_over_older_update(self):
         self.stage()
@@ -206,7 +206,7 @@ a.start_argv({'run_id':'lease-test','identity':'synthetic','task':{'max_seconds'
                 time.sleep(.025)
             self.assertTrue(ready.exists(), 'Detached synthetic child did not start')
             self.stage()
-            self.assertIn('1.0.1-preview', self.launch().stdout)
+            self.assertIn('1.0.2-preview', self.launch().stdout)
             self.assertTrue(updater.state()['pending'])
             blocked = subprocess.run([str(self.launcher), '--uninstall'], capture_output=True, text=True, timeout=10)
             self.assertEqual(blocked.returncode, 2, blocked.stderr)
@@ -313,7 +313,15 @@ a.start_argv({'run_id':'lease-test','identity':'synthetic','task':{'max_seconds'
         with self.assertRaisesRegex(RuntimeError, 'immutable release failed integrity'):
             install(candidate)
         self.assertEqual(updater.state(), before)
-        self.assertIn('1.0.1-preview', self.launch().stdout)
+        self.assertIn('1.0.2-preview', self.launch().stdout)
+
+    def test_curated_manifest_uses_public_raw_without_rest_api(self):
+        with patch.object(updater, 'fetch', return_value=json.dumps(self.item).encode()) as fetch:
+            result = updater.manifest()
+        self.assertEqual(result['commit'], self.item['commit'])
+        self.assertEqual(fetch.call_args.args[0],
+            'https://raw.githubusercontent.com/ongsh/Nori/codex/nori-p1-rebuild-20261107/distribution/update.json')
+        self.assertEqual(fetch.call_count, 1)
 
     def test_redirect_is_rejected_before_follow(self):
         with self.assertRaises(RuntimeError):
@@ -322,6 +330,6 @@ a.start_argv({'run_id':'lease-test','identity':'synthetic','task':{'max_seconds'
     def test_manifest_rejects_untrusted_revision_and_unbounded_size(self):
         for commit, size in [('main', 4), ('a'*40, updater.MAX_BUNDLE+1)]:
             item = dict(self.item, commit=commit, bundle_size=size)
-            with patch.object(updater, 'fetch', side_effect=[json.dumps({'sha':'c'*40}).encode(), json.dumps(item).encode()]):
+            with patch.object(updater, 'fetch', return_value=json.dumps(item).encode()):
                 with self.assertRaises(RuntimeError):
                     updater.manifest()

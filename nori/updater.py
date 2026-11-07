@@ -167,10 +167,9 @@ def fetch(url, limit):
 
 
 def manifest():
-    head = json.loads(fetch(f'https://api.github.com/repos/{REPOSITORY}/commits/{BRANCH}', 256 * 1024))['sha']
-    if not isinstance(head, str) or not re.fullmatch('[0-9a-f]{40}', head):
-        raise RuntimeError('Invalid upstream revision.')
-    raw = fetch(f'https://raw.githubusercontent.com/{REPOSITORY}/{head}/distribution/update.json', 16384)
+    # The curated pointer is intentionally mutable; its payload commit is not.
+    # This public raw path needs no API credentials or GitHub REST quota.
+    raw = fetch(f'https://raw.githubusercontent.com/{REPOSITORY}/{BRANCH}/distribution/update.json', 16384)
     item = json.loads(raw)
     if (item.get('schema') != 1 or not re.fullmatch('[0-9a-f]{40}', str(item.get('commit', '')))
             or not re.fullmatch('[0-9a-f]{64}', str(item.get('bundle_sha256', '')))
