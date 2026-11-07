@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import time
 import uuid
+from . import __version__
 from .demo import run_demo, example_spec
 from .store import Store, NoriError, digest
 from .core import manifest
@@ -19,8 +20,13 @@ def adapter_for(name, home, root):
 
 
 def parser():
-    p = argparse.ArgumentParser(description='Nori: local serial task control and independent acceptance')
+    p = argparse.ArgumentParser(prog='nori', description='Nori: local serial task control and independent acceptance')
+    p.add_argument('--version', action='version', version=f'Nori {__version__}')
     sub = p.add_subparsers(dest='action', required=True)
+    x = sub.add_parser('web', help='Open the local browser interface')
+    x.add_argument('--data-dir', default=str(Path.home() / '.local/share/nori-web'))
+    x.add_argument('--port', type=int, default=8765)
+    x.add_argument('--no-browser', action='store_true')
     x = sub.add_parser('demo'); x.add_argument('directory')
     sub.add_parser('example', help='Print an editable synthetic spec')
     for action in ('init','status','approve','run','probe','pause','resume','reconcile','verify','audit','finalize',
@@ -153,7 +159,18 @@ def execute(args):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if not argv:
+        argv = ['web']
     args = parser().parse_args(argv)
+    if args.action == 'web':
+        from .web import serve
+        try:
+            serve(args.data_dir, port=args.port, open_browser=not args.no_browser)
+            return 0
+        except (OSError, ValueError, NoriError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     try:
         print(json.dumps(execute(args), ensure_ascii=False, indent=2))
         return 0

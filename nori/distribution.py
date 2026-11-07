@@ -34,6 +34,8 @@ def owned_archive(path):
 
 def install(source):
     supported()
+    if os.geteuid() == 0:
+        print('Warning: installing for root, not your regular WSL/Linux user. Prefer running without sudo as your normal user.')
     source = Path(source).resolve()
     if not owned_archive(source):
         raise RuntimeError('Install from the built nori.pyz distribution, not a source checkout.')
@@ -57,7 +59,7 @@ def install(source):
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-    print(f'Installed: {launcher}\nRun: {launcher} --help')
+    print(f'Installed: {launcher}\nOpen the browser interface: {launcher}\nKeep its terminal open while using Nori. In WSL, paste the printed URL into your browser if needed.')
     if str(launcher.parent) not in os.environ.get('PATH', '').split(os.pathsep):
         print('Optional, for this shell: export PATH="$HOME/.local/bin:$PATH"')
     print('No shell startup files changed. Uninstall: ' + str(launcher) + ' --uninstall')

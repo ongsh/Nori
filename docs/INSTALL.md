@@ -19,7 +19,7 @@ Nori is distributed as one `nori.pyz` application file, with a built-in offline 
    python3 nori.pyz --install
    ```
 
-4. Run from anywhere using `~/.local/bin/nori --help`. If `~/.local/bin` is already on PATH, simply use `nori`. Otherwise, `export PATH="$HOME/.local/bin:$PATH"` enables the short command for the current shell. Add that line yourself to your shell configuration if desired; the installer never edits shell startup files.
+4. Run from anywhere using `~/.local/bin/nori` to start the browser interface. If `~/.local/bin` is already on PATH, simply use `nori`. Otherwise, `export PATH="$HOME/.local/bin:$PATH"` enables the short command for the current shell. Add that line yourself to your shell configuration if desired; the installer never edits shell startup files.
 
 The checksum detects corruption, not a malicious publisher. Only install an artifact from the trusted repository/run. No public release is required, the repository stays private, and no token is placed into a URL, script, argument, or config file. Browser download uses your existing GitHub access. Users without repository access cannot download the artifact; an authorized owner must provide the package through an approved private channel. Do not make the repository public to install it.
 
@@ -70,3 +70,10 @@ Run in Bash on Linux/WSL2 with Python 3.11+, curl, trusted CA certificates, and 
 Before public access exists, unauthenticated installation fails. It does not bypass private-repository restrictions or request tokens; use the private artifact route instead. Network tests use mocked HTTPS responses and isolated temporary homes; public internet installation cannot be proven until the owner chooses to expose the repository. No visibility change or release is performed by this implementation.
 
 Maintainers updating application code must rebuild `distribution/nori.pyz.b64` from `dist/nori.pyz` and update `BUNDLE_SHA256` in the bootstrap. CI verifies that the committed package exactly matches source and that corrupt downloads never execute.
+
+
+## Browser startup
+
+Run `~/.local/bin/nori` after installation. The default entry now starts a local browser interface instead of requiring a CLI action. If automatic opening is unavailable in WSL, paste the complete printed URL into your Windows browser. Keep the terminal/server running while using the UI. Do not expose or forward the server port publicly. An alternative port can be selected with `nori web --port 8766`.
+
+Installation is per Linux user. If the terminal is running as root, the package is installed under `/root`, not your normal WSL account; the installer warns about this. Prefer your normal WSL account without sudo. Do not copy root credentials or state directories between accounts as a workaround.

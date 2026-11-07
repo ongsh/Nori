@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.request
 from scripts.build_distribution import build
 
 
@@ -25,7 +26,17 @@ class DistributionTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             launcher = home / '.local/bin/nori'
             archive.unlink()  # Installed program must not depend on download or checkout.
+            self.assertIn('Nori 1.0.0', call(str(launcher), '--version').stdout)
             self.assertEqual(call(str(launcher), '--help').returncode, 0)
+            server = subprocess.Popen([str(launcher), 'web', '--port', '0', '--no-browser', '--data-dir', str(root/'web-data')], cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                url = server.stdout.readline().strip().split('http://', 1)[1]
+                with urllib.request.urlopen('http://' + url.split('#')[0], timeout=5) as response:
+                    self.assertIn('Nori 工作台', response.read().decode())
+            finally:
+                server.terminate()
+                server.communicate(timeout=5)
+
             result = call(str(launcher), 'demo', str(root / 'synthetic'))
             self.assertEqual(result.returncode, 0, result.stderr)
             installed = home / '.local/lib/nori/nori.pyz'
