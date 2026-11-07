@@ -86,12 +86,61 @@ class WebTests(unittest.TestCase):
         self.assertIn('草稿修改未提交不生效', html)
         self.assertIn("pretty(snapshot.state.spec)", html)
         self.assertIn("await refresh(action==='accept-revision')", html)
-        self.assertIn("const created=await api('/api/command',{project:name,action:'create',spec});current=name;snapshot=created", html)
+        self.assertIn("const created=await api('/api/command',{project:name,action:'create',spec});reset();current=name;snapshot=created", html)
         self.command('create')
         before = self.snapshot()['state']
         status, _ = self.request('/api/command', {'project':'simulation', 'action':'create'})
         self.assertEqual(status, 400)
         self.assertEqual(self.snapshot()['state'], before)
+
+    def test_requirement_drafts_persist_original_text_and_reopen(self):
+        text = '做一个本地任务管理页。<script>alert(1)</script>'
+        status, first = self.request('/api/draft', {'text': text})
+        self.assertEqual(status, 200, first)
+        self.assertEqual(first['status'], 'DRAFT')
+        self.assertEqual(first['original_requirement'], text)
+        self.assertTrue(first['created_at'])
+        self.assertEqual(self.request('/api/projects')[1]['projects'], [])
+        status, second = self.request('/api/draft', {'id': first['id'], 'text': '补充：无需联网，先做界面。'})
+        self.assertEqual(status, 200, second)
+        self.assertEqual(second['original_requirement'], text)
+        self.assertEqual(len(second['messages']), 2)
+        self.assertEqual(self.request('/api/draft/' + first['id'])[1], second)
+        from nori.web import WebApp
+        reopened = WebApp(self.temp.name)
+        self.assertEqual(reopened.read_draft(first['id']), second)
+        self.assertEqual(reopened.list_drafts()[0]['id'], first['id'])
+        _, html = self.request('/')
+        self.assertIn('尚未连接自动规划', html)
+        self.assertIn('el.textContent=text', html)
+        self.assertNotIn(text, html)
+        self.assertEqual(self.request('/api/draft', {'text': ' '})[0], 400)
+        self.assertEqual(self.request('/api/draft', {'text': 'test', 'id': '../escape'})[0], 400)
+        self.assertEqual(self.request('/api/drafts', headers={'X-Nori-Token': ''})[0], 403)
+
+    def test_one_click_example_repair_requires_separate_approval(self):
+        spec = example_spec()
+        spec['tasks']['A']['mock_mode'] = 'incomplete'
+        self.command('create', spec=spec)
+        self.command('approve', digest=self.snapshot()['approval_digest'])
+        self.command('step'); self.command('step')
+        before = self.snapshot()['state']
+        result = self.command('repair-example')['result']
+        after = self.snapshot()['state']
+        self.assertEqual(after['spec'], before['spec'])
+        self.assertEqual(after['tasks']['B']['attempts'], 0)
+        self.assertEqual(after['tasks']['A']['evidence']['verdict'], 'FAIL')
+        expected = json.loads(json.dumps(spec))
+        expected['tasks']['A']['mock_mode'] = 'complete'
+        self.assertEqual(result['spec'], expected)
+        proposal_id = next(iter(after['proposals']))
+        self.command('accept-revision', proposal=proposal_id, digest=result['digest'])
+        for _ in range(8):
+            self.command('step')
+            if self.snapshot()['state']['project_status'] == 'COMPLETED': break
+        final = self.snapshot()['state']
+        self.assertEqual(final['project_status'], 'COMPLETED')
+        self.assertTrue(any(r.get('verification', {}).get('verdict') == 'FAIL' for r in final['runs'].values()))
 
     def test_pause_resume_cancel_and_stale_revision(self):
         self.command('create')
