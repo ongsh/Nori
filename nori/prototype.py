@@ -121,6 +121,9 @@ class PrototypeStore:
                 _text(n['title'], True)
                 for field in ('description', 'agent', 'status', 'agent_report', 'acceptance'):
                     _text(n[field])
+                if 'acceptance_criteria' in n:
+                    from .intake import _strings
+                    _strings(n['acceptance_criteria'])
                 if type(n['progress']) is not int or not 0 <= n['progress'] <= 100 or type(n['collapsed']) is not bool:
                     raise PrototypeError('Invalid progress or collapse value')
                 if n['parent_id'] is not None:
@@ -137,6 +140,9 @@ class PrototypeStore:
                 todo.extend(children.get(nid, []))
             if seen != set(by_id):
                 raise PrototypeError('Disconnected prototype tree')
+            if 'intake' in p:
+                from .intake import validate_metadata
+                validate_metadata(p['intake'])
             proposal = p.get('proposal')
             if proposal is not None:
                 _id(proposal['id'])
@@ -222,12 +228,66 @@ class PrototypeStore:
             result = []
             for name in names:
                 p = self._read(directory, name[:-5])
-                result.append({k: p[k] for k in ('id', 'title', 'revision', 'root_id', 'illustrative_only')})
+                summary = {k: p[k] for k in ('id', 'title', 'revision', 'root_id', 'illustrative_only')}
+                summary['intake'] = 'intake' in p
+                result.append(summary)
             return result
 
     def create_project(self, title):
         with self._locked() as directory:
             return self._create(directory, title)
+
+    def import_intake(self, raw_text, *, confirmed=False, digest=None, command_id=None):
+        """Atomically save an explicitly confirmed draft, never a kernel spec.
+
+        Canonical-document identity prevents duplicate imports across processes
+        and restarts. Only the initial create command ID is retained. Provenance
+        and the editable graph live in one record.
+        """
+        from .intake import IntakeError, preview_intake, validate_command_id
+        preview = preview_intake(raw_text)
+        if confirmed is not True or digest != preview['digest']:
+            raise IntakeError('请先预览当前 JSON，再明确确认导入；内容变化后需要重新预览')
+        validate_command_id(command_id)
+        with self._locked() as directory:
+            names = sorted(n for n in os.listdir(directory) if n.endswith('.json'))
+            existing = None
+            for name in names:
+                project = self._read(directory, name[:-5])
+                provenance = project.get('intake')
+                if not provenance:
+                    continue
+                if provenance['command_id'] == command_id and provenance['digest'] != digest:
+                    raise IntakeError('此请求标识已用于其他内容，请重新预览后导入')
+                if provenance['digest'] == digest:
+                    existing = project
+            if existing is not None:
+                return copy.deepcopy(existing)
+            if len(names) >= LIMITS['max_projects']:
+                raise IntakeError('Prototype project limit reached')
+            doc = preview['document']
+            mapping = {n['id']: uuid.uuid4().hex for n in doc['nodes']}
+            nodes = []
+            for source in doc['nodes']:
+                node = _node(source['title'], mapping.get(source['parent_id']))
+                node['id'] = mapping[source['id']]
+                node['description'] = source['description']
+                node['status'] = '需求草稿：未执行'
+                node['acceptance'] = '未验收'
+                # Criteria describe future checks, never an acceptance result.
+                node['acceptance_criteria'] = copy.deepcopy(source['acceptance_criteria'])
+                nodes.append(node)
+            root = next(n['id'] for n in nodes if n['parent_id'] is None)
+            project = dict(id=uuid.uuid4().hex, title=doc['title'], revision=0,
+                           root_id=root, nodes=nodes, proposal=None,
+                           illustrative_only=True, limits=dict(LIMITS),
+                           intake=dict(raw_text=raw_text, digest=digest,
+                                       document=copy.deepcopy(doc), id_map=mapping,
+                                       command_id=command_id,
+                                       approval_status='UNAPPROVED',
+                                       execution_status='UNEXECUTED'))
+            self._write(directory, project)
+            return copy.deepcopy(project)
 
     def get_project(self, project_id):
         with self._locked() as directory:
@@ -254,11 +314,15 @@ class PrototypeStore:
                     raise PrototypeError('The root cannot have siblings')
                 p['nodes'].append(_node(fields['title'], parent))
             elif action in ('rename', 'update'):
-                allowed = {'title'} if action == 'rename' else {'title', 'description', 'agent', 'progress', 'status', 'agent_report', 'acceptance', 'collapsed'}
+                allowed = {'title'} if action == 'rename' else {'title', 'description', 'agent', 'progress', 'status', 'agent_report', 'acceptance', 'collapsed', 'acceptance_criteria'}
                 if not fields or not set(fields) <= allowed:
                     raise PrototypeError('Invalid prototype fields')
                 for key, value in fields.items():
-                    if key == 'progress':
+                    if key == 'acceptance_criteria':
+                        from .intake import _strings
+                        _strings(value)
+                        value = copy.deepcopy(value)
+                    elif key == 'progress':
                         if type(value) is not int or not 0 <= value <= 100:
                             raise PrototypeError('Progress must be an integer from 0 to 100')
                     elif key == 'collapsed':

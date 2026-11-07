@@ -1,6 +1,7 @@
 """Browser acceptance of persisted requirements and honest synthetic workflows."""
 from pathlib import Path
 import base64
+import json
 import sys
 import shutil
 import tempfile
@@ -191,26 +192,72 @@ def main():
                 page.locator('#prototypeGraph .mind-node').filter(has_text='第5层子任务').click()
                 expect(page.locator('#nodeAgentReport')).to_have_value('原型自报已完成，尚未验收')
                 expect(page.locator('#nodeAcceptance')).to_have_value('未验收')
+                from nori.intake import STANDARD_TEMPLATE
+                document = json.loads(json.dumps(STANDARD_TEMPLATE))
+                document['title'] = '外部导入阅读清单'
+                document['original_request'] = '<script>window.syntheticInjection=true</script> 做本地阅读清单'
+                document['nodes'][0]['acceptance_criteria'] = ['能够看到保存的书名']
+                raw = json.dumps(document, ensure_ascii=False)
+                before_count = len(server.app.prototypes.list_projects())
                 page.locator('#newChat').click()
-                requirement = '做一个本地阅读清单，记录书名和阅读状态。先保存需求，不要执行。'
-                page.locator('#prompt').fill(requirement)
-                page.locator('#openUpdate').click()
-                page.locator('#backUpdate').click()
-                expect(page.locator('#prompt')).to_have_value(requirement)
-                page.locator('#saveDraft').click()
-                expect(page.locator('#messages')).to_contain_text(requirement)
-                expect(page.locator('#messages')).to_contain_text('尚未规划')
-                expect(page.locator('#projectView')).to_be_hidden()
+                expect(page.locator('#rolePrompt')).not_to_have_value('')
+                page.evaluate("Object.defineProperty(navigator, 'clipboard', {value:{writeText:async()=>{throw Error('synthetic denied')}}, configurable:true})")
+                page.locator('#copyRolePrompt').click()
+                expect(page.locator('#copyStatus')).to_contain_text('已选中全文')
+                page.locator('#intakeJson').fill('{')
+                page.locator('#previewIntake').click()
+                expect(page.locator('#intakeError')).not_to_have_text('')
+                expect(page.locator('#confirmIntake')).to_be_disabled()
+                page.locator('#intakeFile').set_input_files({'name':'requirements.json','mimeType':'application/json','buffer':raw.encode()})
+                expect(page.locator('#intakeJson')).to_have_value(raw)
+                page.locator('#previewIntake').click()
+                expect(page.locator('#intakeReadable')).to_contain_text('能够看到保存的书名')
+                assert len(server.app.prototypes.list_projects()) == before_count
+                page.locator('#cancelIntake').click()
+                expect(page.locator('#intakePreview')).to_be_hidden()
+                assert len(server.app.prototypes.list_projects()) == before_count
+                page.locator('#intakeJson').fill(raw)
+                page.locator('#previewIntake').click()
+                expect(page.locator('#confirmIntake')).to_be_enabled()
+                page.locator('#intakeJson').fill(raw + ' ')
+                expect(page.locator('#confirmIntake')).to_be_disabled()
+                page.locator('#previewIntake').click()
+                expect(page.locator('#confirmIntake')).to_be_enabled()
+                screenshot('intake-preview')
+                def verify_pending_import(route):
+                    for selector in ('#cancelIntake', '#intakeJson', '#intakeFile', '#closeEditor'):
+                        expect(page.locator(selector)).to_be_disabled()
+                    expect(page.locator('#intakeError')).to_contain_text('提交后不能撤回')
+                    route.continue_()
+                page.route('**/api/requirements/import', verify_pending_import, times=1)
+                page.locator('#confirmIntake').click()
+                expect(page.locator('#importedReadable')).to_contain_text(document['original_request'])
+                expect(page.locator('#modeLabel')).to_contain_text('未批准')
+                expect(page.locator('#nodeAcceptance')).to_have_count(0)
+                expect(page.locator('#nodeAgentReport')).to_have_count(0)
+                assert page.evaluate('window.syntheticInjection') is None
+                imported = next(x for x in server.app.prototypes.list_projects() if x['title'] == document['title'])
+                assert len(server.app.prototypes.list_projects()) == before_count + 1
                 page.reload()
-                expect(page.locator('#draftList button')).to_have_count(1)
-                page.locator('#draftList button').click()
-                expect(page.locator('#messages')).to_contain_text(requirement)
-                page.locator('#messages button').filter(has_text='补充需求').click()
-                page.locator('#prompt').fill('补充：数据只保存在本机。')
-                page.locator('#saveDraft').click()
-                expect(page.locator('#messages')).to_contain_text('补充：数据只保存在本机。')
-                expect(page.locator('#messages')).to_contain_text(requirement)
+                page.locator('#mapList [data-map-id="'+imported['id']+'"]').click()
+                expect(page.locator('#importedReadable')).to_contain_text('能够看到保存的书名')
+                loaded = server.app.prototypes.get_project(imported['id'])
+                server.app.prototypes.mutate(imported['id'], 'update', expected_revision=loaded['revision'],
+                    node_id=loaded['root_id'], acceptance_criteria=['只属于当前编辑，不是原始条件'])
+                page.reload()
+                page.locator('#mapList [data-map-id="'+imported['id']+'"]').click()
+                expect(page.locator('#nodeDetails')).to_contain_text('能够看到保存的书名')
+                expect(page.locator('#nodeDetails')).not_to_contain_text('只属于当前编辑，不是原始条件')
+                expect(page.locator('#importedReadable')).to_contain_text('能够看到保存的书名')
                 screenshot('requirement')
+                page.locator('#newChat').click()
+                page.locator('#intakeJson').fill(raw)
+                page.locator('#previewIntake').click()
+                expect(page.locator('#confirmIntake')).to_be_enabled()
+                page.locator('#confirmIntake').click()
+                expect(page.locator('#importedReadable')).to_be_visible()
+                assert len(server.app.prototypes.list_projects()) == before_count + 1
+                assert not list((Path(directory)/'data').glob('*/control/state.json'))
                 page.locator('#newChat').click()
                 page.locator('#showDemo').click()
                 page.locator('#newid').fill('browser-success')

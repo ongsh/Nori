@@ -53,6 +53,66 @@ class WebTests(unittest.TestCase):
         self.assertEqual(status, 200, result)
         return result
 
+    def test_external_requirement_preview_confirm_cancel_repeat(self):
+        from nori.intake import STANDARD_TEMPLATE
+        from nori.web import WebApp
+        document = json.loads(json.dumps(STANDARD_TEMPLATE))
+        document['title'] = '外部讨论合成需求'
+        document['original_request'] = '<script>synthetic</script> 不应执行 /tmp/no-file'
+        document['nodes'][0]['acceptance_criteria'] = ['能观察到合成结果']
+        raw = json.dumps(document, ensure_ascii=False)
+        before = self.request('/api/maps')[1]
+        status, template = self.request('/api/requirements/template')
+        self.assertEqual(status, 200)
+        self.assertIn('prompt', template)
+        for headers in ({'X-Nori-Token': ''}, {'Origin': 'https://evil.example'}):
+            self.assertEqual(self.request('/api/requirements/preview', {'raw_text': raw}, headers)[0], 403)
+            self.assertEqual(self.request('/api/requirements/import', {'raw_text': raw, 'confirmed': True}, headers)[0], 403)
+        for bad in ('{', '[]', '```json\n{}\n```'):
+            self.assertEqual(self.request('/api/requirements/preview', {'raw_text': bad})[0], 400)
+        status, preview = self.request('/api/requirements/preview', {'raw_text': raw})
+        self.assertEqual(status, 200, preview)
+        self.assertEqual(preview['document'], document)
+        self.assertEqual(self.request('/api/maps')[1], before)  # Cancel means no import call.
+        body = dict(raw_text=raw, digest=preview['digest'], command_id='http-intake')
+        for confirmed in (None, False, 1, 'true'):
+            self.assertEqual(self.request('/api/requirements/import', dict(body, confirmed=confirmed))[0], 400)
+        self.assertEqual(self.request('/api/maps')[1], before)
+        self.assertEqual(self.request('/api/requirements/import', dict(body, confirmed=True, digest='wrong'))[0], 400)
+        status, project = self.request('/api/requirements/import', dict(body, confirmed=True))
+        self.assertEqual(status, 200, project)
+        self.assertEqual(project['intake']['document'], document)
+        self.assertEqual(project['intake']['approval_status'], 'UNAPPROVED')
+        self.assertEqual(project['intake']['execution_status'], 'UNEXECUTED')
+        self.assertEqual(self.request('/api/requirements/import', dict(body, confirmed=True))[1]['id'], project['id'])
+        self.assertEqual(self.request('/api/requirements/import', dict(body, confirmed=True, command_id='new-attempt'))[1]['id'], project['id'])
+        self.assertEqual(WebApp(self.temp.name).prototypes.get_project(project['id']), project)
+        original_criteria = project['intake']['document']['nodes'][0]['acceptance_criteria']
+        edited = self.server.app.prototypes.mutate(project['id'], 'update',
+            expected_revision=project['revision'], node_id=project['root_id'], acceptance_criteria=['仅本地修改的条件'])
+        self.assertEqual(self.request('/api/map/' + project['id'])[1], edited)
+        self.assertEqual(edited['intake']['document']['nodes'][0]['acceptance_criteria'], original_criteria)
+        self.assertEqual(edited['intake']['id_map'][document['nodes'][0]['id']], project['root_id'])
+
+        self.assertEqual(self.request('/api/projects')[1]['projects'], [])
+        self.assertEqual(len(self.request('/api/maps')[1]['maps']), len(before['maps']) + 1)
+        _, html = self.request('/')
+        for selector in ('rolePrompt', 'copyRolePrompt', 'intakeJson', 'intakeFile', 'previewIntake', 'confirmIntake', 'cancelIntake', 'importedReadable'):
+            self.assertIn('id="' + selector + '"', html)
+        self.assertIn('Object.entries(mapProject.intake.id_map)', html)
+        self.assertNotIn('original?.acceptance_criteria||n.acceptance_criteria', html)
+        self.assertIn('if(intakeSubmitting)return', html)
+        self.assertNotIn('id="saveDraft"', html)
+        self.assertNotIn('id="prompt"', html)
+
+    def test_ui_literal_dom_references_exist(self):
+        import re
+        from nori.web import HTML
+        ids = set(re.findall(r'id="([^"]+)"', HTML))
+        ids.update(re.findall(r"(?:inputField|actionButton)\('([^']+)'", HTML))
+        references = set(re.findall(r"\$\('([^']+)'\)", HTML))
+        self.assertEqual(references - ids, set())
+
     def test_update_auth_confirmation_and_no_implicit_network(self):
         from unittest.mock import Mock
         updater = Mock()
@@ -153,7 +213,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(reopened.read_draft(first['id']), second)
         self.assertEqual(reopened.list_drafts()[0]['id'], first['id'])
         _, html = self.request('/')
-        self.assertIn('尚未连接自动规划', html)
+        self.assertIn('Nori 不提供内置对话', html)
         self.assertIn('el.textContent=text', html)
         self.assertNotIn(text, html)
         self.assertEqual(self.request('/api/draft', {'text': ' '})[0], 400)
