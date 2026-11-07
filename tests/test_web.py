@@ -142,6 +142,24 @@ class WebTests(unittest.TestCase):
         self.assertEqual(final['project_status'], 'COMPLETED')
         self.assertTrue(any(r.get('verification', {}).get('verdict') == 'FAIL' for r in final['runs'].values()))
 
+    def test_mindmap_prototype_is_explicit_and_does_not_create_tasks(self):
+        status, html = self.request('/')
+        self.assertEqual(status, 200)
+        for text in ('Nori 自我迭代', '用 Nori 内核完善 Nori Web',
+                     '交互原型示例 · 不代表真实执行 · 不会自动修改自身',
+                     '父子', 'risk-drift'):
+            if text == '父子':
+                self.assertIn('不是执行顺序', html)
+            else:
+                self.assertIn(text, html)
+        for selector in ('prototypeGraph', 'nodeDetails', 'graphZoomIn', 'graphZoomOut',
+                         'graphFit', 'collapseGraph', 'workBoard', 'decisionQueue', 'riskList'):
+            self.assertIn('id="' + selector + '"', html)
+        self.assertIn('node.dataset.nodeId=item.id', html)
+        self.assertIn('风险不来自实时监控', html)
+        self.assertEqual(self.request('/api/projects')[1]['projects'], [])
+        self.assertEqual(self.request('/api/drafts')[1]['drafts'], [])
+
     def test_pause_resume_cancel_and_stale_revision(self):
         self.command('create')
         self.command('approve', digest=self.snapshot()['approval_digest'])
