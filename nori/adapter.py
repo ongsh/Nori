@@ -1,10 +1,11 @@
 """Deterministic, disk-backed simulator; no model, shell, network or PID guessing."""
 import json
-from .core import file_path
+from .core import file_path, in_scope
 from .store import atomic_write, canonical, NoriError
 
 
 class MockAdapter:
+    name = 'mock'
     def __init__(self, home, workspace):
         self.home = home / 'mock-receipts'
         self.root = workspace
@@ -34,12 +35,13 @@ class MockAdapter:
         if mode not in ('complete', 'incomplete', 'hold', 'copy'):
             raise NoriError('Unsupported mock scenario')
         receipt = {'run_id': rid, 'identity': run['identity'], 'phase': 'RUNNING',
-                   'start_count': 1, 'claimed_result': 'DONE', 'exit_code': None}
+                   'start_count': 1, 'claimed_result': 'DONE', 'exit_code': None,
+                   'task_id': run['task_id'], 'run': run}
         atomic_write(self._path(rid), canonical(receipt))  # Before any output side effect.
         if mode == 'hold':
             return receipt
         for name, text in run['task']['mock_outputs'].items():
-            if name not in run['task']['write_scope']:
+            if not in_scope(name, run['task']['write_scope']):
                 raise NoriError('Mock output outside approved write scope')
             if mode == 'incomplete':
                 text = text.splitlines(keepends=True)[0]
@@ -50,6 +52,24 @@ class MockAdapter:
         receipt.update(phase='EXITED', exit_code=0)
         atomic_write(self._path(rid), canonical(receipt))
         return receipt
+
+    def probe(self):
+        return {'adapter': 'mock', 'status': 'available', 'model_access': 'not_applicable'}
+
+    observe = reconcile
+
+    def collect(self, rid):
+        record = self.reconcile(rid)
+        if not record or record['phase'] != 'EXITED':
+            raise NoriError('Mock execution has not exited')
+        return record
+
+    def inventory(self):
+        records = []
+        for path in sorted(self.home.glob('*.json')):
+            record = self.reconcile(path.stem)
+            records.append(record or {'run_id': path.stem, 'phase': 'UNKNOWN'})
+        return records
 
     def request_stop(self, rid):
         receipt = self.reconcile(rid)

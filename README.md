@@ -1,64 +1,69 @@
 # Nori
 
-Nori 是一个本地、串行、带独立验收的工作控制核心。这是设计稿的 **P1 最小框架**，不是已接入 Claude Code / Codex 的完整生产系统。
+Nori 是本地、串行的工作控制框架：固定需求与计划，安排执行工序，持续监督，再根据独立证据决定是否交付。实现以《Agent Factory 1.0 系统架构与详细方案 v0.1》为基线。
 
-## 立即运行
+**当前状态：V1 框架功能已实现，合成任务测试覆盖；真实双平台联调尚未全部通过。** Codex 与 Claude Code 的官方 CLI 适配器已有实现。当前测试机 Codex 已安装并报告登录，但实际合成任务因其内部初始化遇到只读文件系统而退出；Claude CLI 未安装。不会把接口代码或替身测试说成真实模型联调通过。
 
-需要 Python 3.11+、POSIX 环境（本轮在 Linux / Python 3.12 验证），不安装第三方依赖：
+## 运行与验收
+
+Python 3.11+，Linux / WSL；只用标准库，无需安装第三方 Python 包。Windows 原生进程与锁不在已验证范围。
 
 ```sh
 python -m unittest discover -s tests -v
+python -m compileall -q nori tests
 python -m nori demo /tmp/nori-first-demo
-python -m nori status /tmp/nori-first-demo/control
 ```
 
-演示目录必须是新的。演示仅在指定目录的 `work/` 写入两个文本文件，不调用真实模型、网络、游戏工程、SVN 或部署工具。
+`demo` 必须用新目录，只写临时文本：A 漏一行却自报完成 → 验收失败 → B 被阻止 → A 新尝试补齐 → B 读取 A → 整体验收通过。没有真实项目、SVN、部署或模型费用。
 
-预期过程：
-
-1. 批准固定版本的需求和计划。
-2. A 只写 `alpha`，漏掉 `beta`，却自报 `DONE`。
-3. 独立验收直接读取批准要求和实际文件，判 `FAIL`；B 仍不能开工。
-4. A 以新 `run_id` 返工，补齐后 `PASS`。
-5. B 读取已验收的 A，生成 `summary` 文本并通过。
-6. 整体验收再次核对两个文件和前置任务，项目才标为 `COMPLETED`。
-
-每次验收的真实输出、文件 SHA-256、固定版本和限制都保存在 `control/state.json`。`progress.md` 与 `events.jsonl` 是可重建的视图，不是第二份真相源。`status` 显示的是已记录状态，不代表外部文件从未再改变；控制器在派发、审计和整体验收时重新核对。
-
-## 已实现的边界
-
-- 需求与初始计划整体摘要审批；覆盖检查、依赖环检查、路径及写入范围检查。
-- `command_id` 去重、预期修订号冲突检查；重复编号换载荷被拒绝。
-- 控制目录与工作副本各有 POSIX 独占锁，进程内也串行化控制操作。
-- 先持久保存 `PREPARED` 运行意图，再持久保存调用保留状态，最后调用适配器。恢复不会猜测或重复启动不明运行。
-- 单工作副本只有一个运行许可；停止请求不是退出确认，验收完成前不派发第二个任务。
-- 模拟适配器用持久运行标识核对，不把 PID 当作身份。保留 `RUNNING`、`STOP_REQUESTED`、`EXITED`、`UNKNOWN`。
-- 自报完成只能成为待验收候选；验收有 `PASS / FAIL / INCONCLUSIVE`。旧运行结果不得覆盖新尝试。
-- 证据绑定原始要求、任务与计划版本、运行和文件摘要。文件或前置依赖变化使后续证据失效。
-- 默认三次实现尝试；超限停止，保留失败证据。任务通过不等于项目完成。
-- 同文件系统临时写入、fsync、校验和、上一版备份、原子替换；视图写入失败不回滚正式状态。
-
-## 恢复与暂停
-
-通过 Python API 使用 `Controller.pause / reconcile / authorize_rework / resume`；已确认退出且验收不确定的任务，需本地用户检查成果并提供返工理由，才允许新尝试。参见 `tests/test_core.py` 的完整例子。P1 CLI 只提供演示、状态和保守备份恢复，没有尚未实现的真实工具控制按钮。
-
-原始状态损坏或丢失时默认拒绝启动。可显式运行：
+完整日常入口不局限于 demo：
 
 ```sh
-python -m nori recover /path/to/control
+python -m nori example > /tmp/nori-spec.json
+python -m nori init /tmp/nori-control --workspace /tmp/nori-work --spec /tmp/nori-spec.json
+# 检查规范，使用 init 返回的 approval_digest 批准该内容：
+python -m nori approve /tmp/nori-control --digest <approval_digest>
+python -m nori run /tmp/nori-control --adapter mock
+python -m nori status /tmp/nori-control
 ```
 
-仅当有有效备份时恢复，并**始终锁为待人工核对**。不会从旧备份自动释放运行许可或重新开工。此版没有自动清除恢复阻塞的命令，也不会回滚、重置或删除业务文件。若原控制器已启动过执行且状态不明，必须人工核对；不能靠新建控制目录绕开。
+规范含目标、稳定要求编号、任务原因、依赖、读写范围、独立验收项、尝试/时间预算、禁止事项和允许操作。`examples/two_text_tasks.json` 可作为输入示例。`write_scope` 支持精确文件和以 `/` 结尾的目录；共享写入位置必须有明确依赖。模型自述不能改变批准版本、正式状态或验收结论。
 
-## 明确未完成
+## 已实现的 V1 路径
 
-- Claude Code / Codex 真实适配器、真实模型成本和取消进程树验证。
-- Windows 原生锁及 Windows/WSL 跨环境恢复测试。
-- Unity、Lua→C#、真实 SVN 工程或通用语义完整性验证。
-- 完整规划器、动态需求变更、多项目服务、Web、并行调度。
-- 任意同账户恶意代码的强隔离。Python API 只供受信任的本地控制程序调用；没有提供给模型的审批接口，也不信任输入的 `actor` 字段。校验和用于发现损坏，不是签名或权限边界。
-- 所有硬件掉电情形的保证。已测试进程强杀和注入写入失败，不能据此宣称任意磁盘/硬件故障安全。
+- **需求与计划**：导入、摘要批准、版本化修订、理由和历史；小范围计划变更不得改目标、验收、操作权限或预算。重要变化必须显式批准新摘要，保留旧失败。
+- **串行执行**：依赖就绪队列、阻塞原因、唯一运行许可、固定输入/基线/版本、持久启动意图、命令去重、旧结果拒绝、有限调度步数。
+- **双适配器**：Claude Code / Codex 官方 CLI 参数，探测、持久进程监督、日志、退出、观察、停止和恢复；只用 argv，不拼 shell，不绕过工具审批。
+- **过程监督**：运行中范围检查、时间和输出预算、缺少进展证据提醒、次数上限。没有文件改动本身不会被当成无效测试或停滞。
+- **独立验收**：精确文本、JSON Pointer 值、预先批准的固定命令、人工检查；三态结果与原始输出；任务和整体验收分开；依据/产物变化使证据失效。
+- **暂停和继续**：停止请求不等于退出，不释放未确认的许可；确认结束后可检查、返工、切换工具。取消与部分交付不会标成技术完成。
+- **状态恢复**：JSON 唯一真相，双层 OS 锁和线程锁、修订校验、fsync/校验和/上一版备份/原子替换；显式恢复后先盘点所有运行与实际文件，不猜测重跑。
+- **用户入口**：终端命令与派生 Markdown 进度/验收报告。调度器在步骤间释放控制锁，另一终端能查询、暂停或取消。
 
-`MockAdapter.confirm_stopped` 是测试中的退出观察模拟，不是可用于真实进程的停止证明。模拟工作副本只应包含小型临时文件；当前完整摘要不适用于大型 Unity 仓库。
+常用命令：
 
-更多设计映射与验证范围见 [docs/P1.md](docs/P1.md)。
+```sh
+python -m nori probe /tmp/nori-control --adapter codex
+python -m nori probe /tmp/nori-control --adapter claude
+python -m nori run /tmp/nori-control --adapter codex --max-steps 30
+python -m nori pause /tmp/nori-control
+python -m nori reconcile /tmp/nori-control
+python -m nori resume /tmp/nori-control
+python -m nori finalize /tmp/nori-control
+python -m nori --help
+```
+
+每个修改命令可传 `--command-id` 和 `--revision`。省略时，CLI 在独占锁内读取当前修订并生成新编号；重试同一请求应复用原编号。
+
+## 重要边界
+
+- 验收只使用临时合成任务，未操作真实游戏/迁移项目。文本或 JSON 反例证明控制路径有效，不等于通用代码语义正确。
+- 框架不自行安装、登录或授予 Claude/Codex 权限。登录、模型访问、具体版本能力和真实沙箱仍以本机探测/联调为准；不自动换工具。
+- Linux 进程组停止和合作式范围检查不是恶意同账户代码的硬隔离。注册命令可能有副作用，必须在用户批准的规范内；没有网络/远端系统的通用强隔离。
+- Windows 原生、真实业务集成、真实双模型完整切换尚未验收。WSL/Linux 是本版实现宿主，不提供未经验证的跨 Windows/WSL 调度。
+- 命令验收首次生成文件会得到 `INCONCLUSIVE`；检查允许的产物后重新固定候选，稳定重跑才能通过。变化无常的输出不能当作稳定证据。
+- 损坏状态默认阻塞。备份恢复不是回滚工作文件，也不等于可以立即重跑。未知进程、缺失日志或无法匹配的运行仍需核对。
+- 已测试真实子进程强杀和写入故障，不宣称覆盖任意硬件掉电。
+- 不含并行、多 Agent 团队、模型路由、Web 平台、自动发布或长期无人值守。
+
+详见 [V1 操作与验收](docs/V1.md)、[适配器说明](docs/ADAPTERS.md)、[P1 历史说明](docs/P1.md)。

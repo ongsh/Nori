@@ -127,6 +127,16 @@ class Store:
         text = '# Nori progress\n\n' + s['project_status'] + '\n\n'
         text += '\n'.join(f"- {k}: {v['status']} (attempts: {v['attempts']})" for k, v in s['tasks'].items())
         atomic_write(self.home / 'progress.md', text.encode())
+        report = '# Nori acceptance report\n\n'
+        report += 'Project: ' + s['project_status'] + '\n'
+        report += f"Requirement version: {s['requirement_version']}; plan version: {s['plan_version']}\n\n"
+        for tid, task in s['tasks'].items():
+            evidence = task.get('evidence') or {}
+            report += f"- {tid}: {task['status']}; verdict={evidence.get('verdict', 'unverified')}; stale={evidence.get('stale', False)}\n"
+        report += '\nFinal: ' + (s.get('final_evidence') or {}).get('verdict', 'not independently accepted') + '\n'
+        report += '\nLimits: declared checks only; no claim of general semantic correctness or hostile-account isolation.\n'
+        atomic_write(self.home / 'acceptance-report.md', report.encode())
+
         atomic_write(self.home / 'events.jsonl', b'\n'.join(canonical(x) for x in s['history']) + b'\n')
 
     def lock_workspace(self, root):

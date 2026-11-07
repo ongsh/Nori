@@ -1,2 +1,2 @@
-"""Nori P1: local, serial control core with a simulated executor."""
-__version__ = '0.1.0'
+"""Nori V1 framework: local serial execution and independent acceptance."""
+__version__ = '1.0.0'

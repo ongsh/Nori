@@ -6,7 +6,7 @@ from .adapter import MockAdapter
 
 
 def example_spec():
-    return {'goal': 'Create two dependent text artifacts and independently verify both',
+    return {'executor': 'mock', 'goal': 'Create two dependent text artifacts and independently verify both',
         'requirements': {'R-A': 'alpha\nbeta\n', 'R-B': 'summary:\nalpha\nbeta\n'},
         'tasks': {
             'A': {'why': 'Produce complete source text', 'requirements': ['R-A'],
