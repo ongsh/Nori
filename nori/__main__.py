@@ -64,7 +64,7 @@ def run_session(args):
     cid = args.command_id or str(uuid.uuid4())
     results = []
     for i in range(args.max_steps):
-        with Store(args.home) as store:
+        with Store(args.home, lock_timeout=2) as store:
             if store.state is None:
                 raise NoriError('Project not initialized')
             c = WorkflowController(store, store.state['workspace'])
@@ -96,7 +96,7 @@ def execute(args):
     if args.action == 'demo': return run_demo(args.directory)
     if args.action == 'example': return example_spec()
     if args.action == 'run': return run_session(args)
-    with Store(args.home, recover=args.action == 'recover') as store:
+    with Store(args.home, recover=args.action == 'recover', lock_timeout=2) as store:
         if args.action == 'recover': return store.state
         if args.action == 'init':
             spec = json.loads(Path(args.spec).read_text())

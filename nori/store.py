@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 
 
 class NoriError(RuntimeError):
@@ -42,19 +43,30 @@ def atomic_write(path, data):
 
 
 class Store:
-    def __init__(self, home, recover=False):
+    def __init__(self, home, recover=False, lock_timeout=0):
         self.mutex = threading.RLock()
+        if not isinstance(lock_timeout, (int, float)) or not 0 <= lock_timeout <= 30:
+            raise NoriError('Lock timeout must be between 0 and 30 seconds')
+        self.lock_timeout = lock_timeout
         if os.name != 'posix':
             raise NoriError('P1 currently requires POSIX locks; Windows is unverified')
         import fcntl
         self.home = Path(home).resolve()
         self.home.mkdir(parents=True, exist_ok=True)
         self.lock = open(self.home / 'controller.lock', 'a+b')
-        try:
-            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            self.lock.close()
-            raise NoriError('Another controller holds this project lock') from exc
+        deadline = time.monotonic() + lock_timeout
+        while True:
+            try:
+                fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    self.lock.close()
+                    raise NoriError('Another controller holds this project lock') from exc
+                time.sleep(0.02)
+            except OSError:
+                self.lock.close()
+                raise
         self.path = self.home / 'state.json'
         self.state = None
         self.poisoned = False
