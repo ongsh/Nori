@@ -145,20 +145,62 @@ class WebTests(unittest.TestCase):
     def test_mindmap_prototype_is_explicit_and_does_not_create_tasks(self):
         status, html = self.request('/')
         self.assertEqual(status, 200)
-        for text in ('Nori 自我迭代', '用 Nori 内核完善 Nori Web',
+        for text in ('Nori 自我迭代', '可操作原型',
                      '交互原型示例 · 不代表真实执行 · 不会自动修改自身',
-                     '父子', 'risk-drift'):
-            if text == '父子':
-                self.assertIn('不是执行顺序', html)
-            else:
-                self.assertIn(text, html)
+                     'Agent 自报', '独立验收'):
+            self.assertIn(text, html)
         for selector in ('prototypeGraph', 'nodeDetails', 'graphZoomIn', 'graphZoomOut',
                          'graphFit', 'collapseGraph', 'workBoard', 'decisionQueue', 'riskList'):
             self.assertIn('id="' + selector + '"', html)
         self.assertIn('node.dataset.nodeId=item.id', html)
-        self.assertIn('风险不来自实时监控', html)
+        self.assertIn('不来自实时监控', html)
         self.assertEqual(self.request('/api/projects')[1]['projects'], [])
         self.assertEqual(self.request('/api/drafts')[1]['drafts'], [])
+
+    def test_interactive_map_http_persistence_and_separate_acceptance(self):
+        status, maps = self.request('/api/maps')
+        self.assertEqual(status, 200)
+        self.assertTrue(maps['maps'])
+        status, p = self.request('/api/map', {'action':'create', 'title':'HTTP 深层脑图'})
+        self.assertEqual(status, 200, p)
+        root = p['root_id']
+        current = root
+        def mutate(action, **values):
+            nonlocal p
+            code, result = self.request('/api/map', dict(id=p['id'], action=action,
+                revision=p['revision'], node_id=current, **values))
+            self.assertEqual(code, 200, result)
+            p = result
+            return result
+        mutate('update', title='已改名的脑图')
+        for depth in range(5):
+            prior = {n['id'] for n in p['nodes']}
+            mutate('add_child', title='第'+str(depth+1)+'层')
+            current = next(n['id'] for n in p['nodes'] if n['id'] not in prior)
+        mutate('update', status='自报完成', progress=100, agent_report='我已经做完（模拟）')
+        node = next(n for n in p['nodes'] if n['id']==current)
+        self.assertEqual(node['acceptance'], '未验收')
+        count = len(p['nodes'])
+        mutate('propose_decomposition')
+        self.assertEqual(len(p['nodes']), count)
+        self.assertTrue(p['proposal'])
+        mutate('confirm_decomposition', proposal_id=p['proposal']['id'])
+        self.assertGreater(len(p['nodes']), count)
+        mutate('update', acceptance='通过（模拟）')
+        status, reopened = self.request('/api/map/'+p['id'])
+        self.assertEqual(reopened, p)
+        code, _ = self.request('/api/map', dict(id=p['id'], action='delete',
+            revision=p['revision'], node_id=current))
+        self.assertEqual(code, 400)
+        mutate('delete', confirmed=True)
+        self.assertLess(len(p['nodes']), count)
+        code, _ = self.request('/api/map', dict(id=p['id'], action='delete',
+            revision=p['revision'], node_id=root, confirmed=True))
+        self.assertEqual(code, 400)
+        self.assertEqual(self.request('/api/projects')[1]['projects'], [])
+        self.assertEqual(self.request('/api/drafts')[1]['drafts'], [])
+        self.assertEqual(self.request('/api/map/'+p['id'], headers={'X-Nori-Token':'wrong'})[0], 403)
+        self.assertEqual(self.request('/api/map/../escape')[0], 400)
 
     def test_pause_resume_cancel_and_stale_revision(self):
         self.command('create')
