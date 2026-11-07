@@ -28,7 +28,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   browser:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
