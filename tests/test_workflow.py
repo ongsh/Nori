@@ -251,6 +251,93 @@ print(json.dumps({'type':'result','is_error':False}))
         self.assertEqual(self.call('close_project')['verdict'], 'PASS')
         self.assertEqual(self.c.state['requirement_version'], 1)
 
+    def test_codex_failure_then_claude_rework_preserves_history_and_dependencies(self):
+        import time
+        from nori.tool_adapters import CodexAdapter, ClaudeCodeAdapter
+        common = """import sys, json, time
+from pathlib import Path
+if '--version' in sys.argv:
+    print('synthetic-cli 1'); raise SystemExit(0)
+if 'status' in sys.argv:
+    raise SystemExit(0)
+raw = sys.stdin.read()
+request = json.loads(raw[raw.index('{'):])
+"""
+        codex_file = self.base / 'codex-omits-line'
+        codex_file.write_text('#!' + sys.executable + '\n' + common + """
+Path('a.txt').write_text('alpha\\n')
+print(json.dumps({'type':'result','claimed_result':'DONE'}), flush=True)
+time.sleep(.2)
+""")
+        claude_file = self.base / 'claude-repairs-and-consumes'
+        claude_file.write_text('#!' + sys.executable + '\n' + common + """
+if 'a.txt' in request['task']['write_scope']:
+    assert Path('a.txt').read_text() == 'alpha\\n', 'partial work was lost'
+    Path('a.txt').write_text('alpha\\nbeta\\n')
+else:
+    original = Path('a.txt').read_text()
+    assert original == 'alpha\\nbeta\\n'
+    Path('b.txt').write_text('summary:\\n' + original)
+print(json.dumps({'type':'result','claimed_result':'DONE'}))
+""")
+        for f in (codex_file, claude_file): f.chmod(0o700)
+        self.approve()
+        original_approval = self.c.state['approval']
+        original_spec = self.c.state['spec']
+        codex = CodexAdapter(self.store.home, self.c.root, executable=str(codex_file))
+        first = self.call('prepare', 'A')
+        self.call('start', first['run_id'], codex)
+        # The old execution still owns the permit until exit and acceptance are confirmed.
+        with self.assertRaises(NoriError): self.call('prepare', 'A')
+        with self.assertRaises(NoriError): self.call('prepare', 'B')
+        def wait_for_exit(adapter, rid):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if self.call('reconcile', rid, adapter) == 'EXITED':
+                    receipt = adapter.reconcile(rid)
+                    self.assertTrue(receipt['exit_confirmed'])
+                    self.assertTrue(receipt['group_empty'])
+                    return
+                time.sleep(.03)
+            self.fail('Synthetic process did not exit within bounded timeout')
+        wait_for_exit(codex, first['run_id'])
+        self.assertEqual(self.c.state['tasks']['A']['status'], 'IMPLEMENTED')
+        with self.assertRaises(NoriError): self.call('prepare', 'B')
+        failed = self.call('verify', first['run_id'])
+        self.assertEqual(failed['verdict'], 'FAIL')
+        self.assertEqual(self.c.state['tasks']['A']['status'], 'REWORK')
+        self.assertIsNone(self.c.state['lease'])
+        with self.assertRaises(NoriError): self.call('prepare', 'B')
+        failed_record = copy.deepcopy(self.c.state['runs'][first['run_id']])
+        # Simulate closing the first operator session before another tool takes over.
+        self.store.close()
+        self.store = Store(self.base / 'control')
+        self.c = WorkflowController(self.store, self.base / 'work')
+        claude = ClaudeCodeAdapter(self.store.home, self.c.root, executable=str(claude_file))
+        second = self.call('prepare', 'A')
+        self.assertNotEqual(second['run_id'], first['run_id'])
+        self.assertEqual(second['baseline']['a.txt'], failed_record['candidate']['files']['a.txt'])
+        self.call('start', second['run_id'], claude)
+        wait_for_exit(claude, second['run_id'])
+        self.assertEqual(self.call('verify', second['run_id'])['verdict'], 'PASS')
+        third = self.call('prepare', 'B')
+        self.call('start', third['run_id'], claude)
+        wait_for_exit(claude, third['run_id'])
+        self.assertEqual(self.call('verify', third['run_id'])['verdict'], 'PASS')
+        self.assertEqual(self.call('close_project')['verdict'], 'PASS')
+        final = self.c.state
+        self.assertEqual(final['project_status'], 'COMPLETED')
+        self.assertEqual(final['approval'], original_approval)
+        self.assertEqual(final['spec'], original_spec)
+        self.assertEqual((final['requirement_version'], final['plan_version']), (1, 1))
+        self.assertEqual(final['runs'][first['run_id']], failed_record)
+        self.assertEqual(final['tasks']['A']['attempts'], 2)
+        self.assertEqual(len(final['runs']), 3)
+        self.assertEqual([final['runs'][r['run_id']]['adapter'] for r in (first, second, third)],
+                         ['codex', 'claude', 'claude'])
+        for run in final['runs'].values():
+            self.assertEqual((run['requirement_version'], run['plan_version'], run['task_revision']), (1, 1, 1))
+
     def test_cli_import_approve_run_query(self):
         base = self.base / 'cli'; base.mkdir()
         spec = base / 'spec.json'; spec.write_text(json.dumps(example_spec()))
