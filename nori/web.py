@@ -11,6 +11,7 @@ import webbrowser
 
 from .store import Store, NoriError, digest
 from .workflow import WorkflowController
+from .core import validate_spec
 from .demo import example_spec
 from .adapter import MockAdapter
 from .tool_adapters import CodexAdapter, ClaudeCodeAdapter
@@ -70,16 +71,13 @@ class WebApp:
             spec = body.get('spec', example_spec())
             if not isinstance(spec, dict):
                 raise NoriError('Spec must be a JSON object')
+            validate_spec(spec)
             path.mkdir(mode=0o700, exist_ok=False)
             with Store(path / 'control') as store:
                 WorkflowController(store, path / 'work').initialize(spec)
             return self.snapshot(name)
         if action == 'run':
             return self.start_job(name, body)
-        if action in ('pause', 'cancel'):
-            with self.lock:
-                if name in self.jobs:
-                    self.jobs[name]['stop'].set()
         if not (path / 'control' / 'state.json').exists():
             raise NoriError('Project not found')
         with Store(path / 'control', lock_timeout=2) as store:
@@ -119,7 +117,14 @@ class WebApp:
                 if action == 'manual-binding': result = {'binding': QualityGate(c.root, c.state['spec']).binding(rid, desc)}
                 else: result = c.record_manual(cid, rev, rid, desc, body['binding'], body['verdict'], reason)
             else: raise NoriError('Unsupported action')
-            return {'result': result, 'revision': c.state['revision']}
+            response = {'result': result, 'revision': c.state['revision']}
+        # Only a successfully committed pause/cancel may stop monitoring.
+        # Acquire the job mutex after releasing Store to preserve lock order.
+        if action in ('pause', 'cancel'):
+            with self.lock:
+                if name in self.jobs:
+                    self.jobs[name]['stop'].set()
+        return response
 
     def start_job(self, name, body):
         steps = body.get('max_steps', 30)

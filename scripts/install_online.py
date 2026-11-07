@@ -9,7 +9,7 @@ import tempfile
 import urllib.error
 import urllib.request
 
-BUNDLE_SHA256 = '01a8b0cfa30a64745d8d5bda7d5f1cf82932906b7209b87a62bd97824d78ae48'
+BUNDLE_SHA256 = '60e931f89b10359e1f1ba9330200c4a2aae4017f54ac03f7452c794ca925aa61'
 MAX_DOWNLOAD = 2 * 1024 * 1024
 
 

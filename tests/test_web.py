@@ -53,6 +53,13 @@ class WebTests(unittest.TestCase):
         self.assertEqual(status, 200, result)
         return result
 
+    def test_invalid_import_does_not_reserve_project_name(self):
+        status, _ = self.request('/api/command', {'project':'simulation','action':'create','spec':{'goal':''}})
+        self.assertEqual(status, 400)
+        self.assertFalse((self.server.app.root/'simulation').exists())
+        self.command('create')
+        self.assertEqual(self.snapshot()['state']['project_status'], 'AWAITING_APPROVAL')
+
     def test_http_complete_synthetic_workflow(self):
         status, html = self.request('/')
         self.assertEqual(status, 200)
@@ -142,6 +149,23 @@ class WebTests(unittest.TestCase):
         self.assertFalse(snap['job']['running'])
         self.assertEqual(snap['state']['project_status'], 'PAUSED')
         self.assertIsNotNone(snap['state']['lease'])
+
+    def test_stale_pause_does_not_stop_background_monitor(self):
+        spec = example_spec()
+        spec['tasks']['A']['mock_mode'] = 'hold'
+        self.command('create', spec=spec)
+        self.command('approve', digest=self.snapshot()['approval_digest'])
+        self.command('run', max_steps=100)
+        for _ in range(50):
+            if self.snapshot()['state']['lease']: break
+            time.sleep(.02)
+        for action in ('pause', 'cancel'):
+            code, result = self.request('/api/command', {'project':'simulation','action':action,'revision':-1,'reason':'stale request'})
+            self.assertEqual(code, 400)
+            self.assertIn('Stale', result['error'])
+            self.assertFalse(self.server.app.jobs['simulation']['stop'].is_set())
+            self.assertTrue(self.snapshot()['job']['running'])
+        self.server.app.jobs['simulation']['stop'].set()
 
     def test_security_host_origin_token_paths_and_json(self):
         for headers in ({'Host':'evil.example'}, {'Origin':'https://evil.example'}, {'X-Nori-Token':'wrong'}):

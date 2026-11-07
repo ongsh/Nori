@@ -67,7 +67,7 @@ The delivered command has this form, replacing both `REVIEWED_COMMIT_SHA` occurr
 
 Run in Bash on Linux/WSL2 with Python 3.11+, curl, trusted CA certificates, and access to raw.githubusercontent.com. No sudo, clone, login token, release, or Actions-artifact download is required once the repository is publicly accessible. The temporary bootstrap/package are removed afterward; only the installed application remains. A failed download stops the command instead of executing an empty/partial response. The bootstrap rejects a wrong checksum, oversized payload, moving revision, and unexpected redirect before executing the package. The bootstrap itself is trusted via HTTPS plus the fixed reviewed commit, not by the bundled checksum; do not run a command from an untrusted sender.
 
-Before public access exists, unauthenticated installation fails. It does not bypass private-repository restrictions or request tokens; use the private artifact route instead. Network tests use mocked HTTPS responses and isolated temporary homes; public internet installation cannot be proven until the owner chooses to expose the repository. No visibility change or release is performed by this implementation.
+Before public access exists, unauthenticated installation fails. It does not bypass private-repository restrictions or request tokens; use the private artifact route instead. The owner has since made the repository public. Anonymous public download and installation have been verified in an isolated temporary home. No visibility change or release is performed by this implementation.
 
 Maintainers updating application code must rebuild `distribution/nori.pyz.b64` from `dist/nori.pyz` and update `BUNDLE_SHA256` in the bootstrap. CI verifies that the committed package exactly matches source and that corrupt downloads never execute.
 
@@ -77,3 +77,5 @@ Maintainers updating application code must rebuild `distribution/nori.pyz.b64` f
 Run `~/.local/bin/nori` after installation. The default entry now starts a local browser interface instead of requiring a CLI action. If automatic opening is unavailable in WSL, paste the complete printed URL into your Windows browser. Keep the terminal/server running while using the UI. Do not expose or forward the server port publicly. An alternative port can be selected with `nori web --port 8766`.
 
 Installation is per Linux user. If the terminal is running as root, the package is installed under `/root`, not your normal WSL account; the installer warns about this. Prefer your normal WSL account without sudo. Do not copy root credentials or state directories between accounts as a workaround.
+
+Browser workflow acceptance runs in CI using Chromium on Ubuntu 24.04 against temporary synthetic projects. It covers creation, approval, execution, failure blocking dependencies, revision approval, rework, final PASS, and retained failure history. Actual WSL desktop browser opening has not been verified on the user’s machine.
