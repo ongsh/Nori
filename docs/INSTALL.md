@@ -52,3 +52,21 @@ python3 scripts/build_distribution.py
 This reproducibly builds `dist/nori.pyz` and `dist/SHA256SUMS` from the package's Python files using only the standard library. CI runs the full test suite, including isolated installation, unrelated-file protection, a synthetic demo, installed subprocess supervision, and uninstall, before publishing a private workflow artifact. No release is created automatically.
 
 Real Codex/Claude model integration has not been successfully validated. The framework's acceptance suite uses executable stand-ins and synthetic tasks; installing the package does not change that limitation.
+
+## One-command online installation after making the repository public
+
+The owner may choose to make this repository public; Nori never changes repository visibility. Public access exposes the repository and its history, not just the installer. If you do not want that, keep the private artifact installation above.
+
+`scripts/install_online.py` downloads the packaged application (not a repository archive), verifies its embedded SHA-256, and invokes the offline installer. It requires an exact 40-character commit SHA. Use the same reviewed commit for the bootstrap and bundle, not `main` (which may not contain this implementation), a branch name, or `latest`.
+
+The delivered command has this form, replacing both `REVIEWED_COMMIT_SHA` occurrences with the supplied verified commit:
+
+```sh
+(set -eu; d=$(mktemp -d); trap 'rm -rf "$d"' EXIT; curl --fail --silent --show-error --proto '=https' 'https://raw.githubusercontent.com/ongsh/Nori/REVIEWED_COMMIT_SHA/scripts/install_online.py' -o "$d/install.py"; python3 "$d/install.py" REVIEWED_COMMIT_SHA)
+```
+
+Run in Bash on Linux/WSL2 with Python 3.11+, curl, trusted CA certificates, and access to raw.githubusercontent.com. No sudo, clone, login token, release, or Actions-artifact download is required once the repository is publicly accessible. The temporary bootstrap/package are removed afterward; only the installed application remains. A failed download stops the command instead of executing an empty/partial response. The bootstrap rejects a wrong checksum, oversized payload, moving revision, and unexpected redirect before executing the package. The bootstrap itself is trusted via HTTPS plus the fixed reviewed commit, not by the bundled checksum; do not run a command from an untrusted sender.
+
+Before public access exists, unauthenticated installation fails. It does not bypass private-repository restrictions or request tokens; use the private artifact route instead. Network tests use mocked HTTPS responses and isolated temporary homes; public internet installation cannot be proven until the owner chooses to expose the repository. No visibility change or release is performed by this implementation.
+
+Maintainers updating application code must rebuild `distribution/nori.pyz.b64` from `dist/nori.pyz` and update `BUNDLE_SHA256` in the bootstrap. CI verifies that the committed package exactly matches source and that corrupt downloads never execute.
